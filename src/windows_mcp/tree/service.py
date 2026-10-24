@@ -23,6 +23,7 @@ from psutil import Process
 from functools import cache
 import logging
 import weakref
+import win32gui
 import win32process
 import os
 
@@ -109,12 +110,36 @@ def _skip_host_processes_enabled(env: "os._Environ[str] | dict[str, str] | None"
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _pids_with_visible_windows() -> frozenset[int]:
+    """Return the PIDs that own a visible top-level window, using Win32 only."""
+    pids: set[int] = set()
+
+    def callback(hwnd: int, _: Any) -> bool:
+        try:
+            if win32gui.IsWindowVisible(hwnd):
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if pid:
+                    pids.add(pid)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumWindows(callback, None)
+    except Exception:
+        return frozenset()
+    return frozenset(pids)
+
+
 @cache
 def _host_process_ids() -> frozenset[int]:
     """Return the PIDs of the processes that launched this server.
 
     Walks the parent chain of the current process (e.g. ``uvx`` -> ``Code.exe`` for an
-    MCP server started by VS Code) and stops at the first shell or system process in
+    MCP server started by VS Code) and stops after the first ancestor that owns a
+    visible top-level window: that is the host. Whatever launched the host (a browser
+    that opened a ``vscode://`` link, a launcher) is a separate app the user may want
+    to automate. The walk also stops before any shell or system process in
     ``_HOST_CHAIN_STOP_NAMES``. The server's own PID is not included; its windows are
     already filtered out by ``Desktop.get_controls_handles``. Cached because the host
     chain cannot change while the server is running.
@@ -123,18 +148,29 @@ def _host_process_ids() -> frozenset[int]:
         The ancestor PIDs, or an empty set when the chain cannot be read.
     """
     pids: set[int] = set()
+    names: list[str] = []
     try:
         parents = Process(os.getpid()).parents()
     except Exception:
         return frozenset()
+    windowed_pids = _pids_with_visible_windows()
     for parent in parents:
         try:
-            name = parent.name().casefold()
+            name = parent.name()
         except Exception:
             break
-        if name in _HOST_CHAIN_STOP_NAMES:
+        if name.casefold() in _HOST_CHAIN_STOP_NAMES:
             break
         pids.add(parent.pid)
+        names.append(name)
+        if parent.pid in windowed_pids:
+            break
+    if names:
+        logger.info(
+            "[Tree] Skipping UIA traversal of MCP host processes: %s "
+            "(set WINDOWS_MCP_SKIP_HOST_PROCESSES=off to include them)",
+            " <- ".join(names),
+        )
     return frozenset(pids)
 
 
@@ -178,6 +214,10 @@ if TYPE_CHECKING:
     from windows_mcp.desktop.service import Desktop
 
 class Tree:
+    # Class-level defaults keep get_nodes usable on instances built without __init__.
+    window_time_budget: Optional[float] = None
+    max_window_elements: Optional[int] = None
+
     def __init__(self,desktop:'Desktop'):
         self.desktop=weakref.proxy(desktop)
         self.screen_size=desktop.get_screen_size()

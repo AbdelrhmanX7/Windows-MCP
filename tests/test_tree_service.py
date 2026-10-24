@@ -815,10 +815,29 @@ class TestHostProcessIds:
         yield
         _host_process_ids.cache_clear()
 
-    def _patch_parents(self, monkeypatch, parents):
+    def _patch_parents(self, monkeypatch, parents, windowed=frozenset()):
         process = MagicMock()
         process.parents.return_value = parents
         monkeypatch.setattr("windows_mcp.tree.service.Process", lambda pid: process)
+        monkeypatch.setattr(
+            "windows_mcp.tree.service._pids_with_visible_windows", lambda: frozenset(windowed)
+        )
+
+    def test_stops_after_the_first_ancestor_that_owns_a_window(self, monkeypatch):
+        """A browser that launched VS Code (vscode:// link) is not part of the host."""
+        self._patch_parents(
+            monkeypatch,
+            [
+                _FakeParent(10, "uv.exe"),
+                _FakeParent(20, "claude.exe"),
+                _FakeParent(30, "Code.exe"),
+                _FakeParent(40, "chrome.exe"),
+                _FakeParent(50, "explorer.exe"),
+            ],
+            windowed={30, 40, 50},
+        )
+
+        assert _host_process_ids() == frozenset({10, 20, 30})
 
     def test_collects_ancestors_up_to_the_shell(self, monkeypatch):
         self._patch_parents(
