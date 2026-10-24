@@ -32,6 +32,7 @@ SEARCH_ENGINES = {
     "duckduckgo": "https://duckduckgo.com/?q={q}",
 }
 _SKIP_URL = ("devtools://", "chrome-extension://", "extension://")
+_TRANSIENT_NET = ("net::ERR_NETWORK_ACCESS_DENIED", "net::ERR_NETWORK_CHANGED")
 _CONTEXT_GONE = ("context was destroyed", "cannot find context", "inspected target navigated")
 
 
@@ -436,6 +437,12 @@ class BrowserService:
         sid = self.page()
         since = conn.mark()
         res = conn.send("Page.navigate", {"url": url}, session=sid, timeout=timeout)
+        if str(res.get("errorText", "")).startswith(_TRANSIENT_NET):
+            # A freshly started network service (or a firewall change) can refuse the very
+            # first request; one quick retry usually goes through.
+            time.sleep(0.3)
+            since = conn.mark()
+            res = conn.send("Page.navigate", {"url": url}, session=sid, timeout=timeout)
         if res.get("errorText"):
             raise BrowserError(f"navigation to {url} failed: {res['errorText']}")
         loaded = self.wait_loader(res.get("loaderId"), since, wait_until, timeout)

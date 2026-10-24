@@ -552,3 +552,19 @@ def test_warm_is_opt_in(monkeypatch, svc, conn):
         svc.session == "S1"
         and ("Target.attachToTarget", {"targetId": "T1", "flatten": True}, None) in conn.sent
     )
+
+
+async def test_transient_network_error_is_retried_once(svc, conn, events):
+    errors = ["net::ERR_NETWORK_ACCESS_DENIED"]
+    original = conn.on_Page_navigate
+
+    def flaky(p):
+        if errors:
+            errors.pop()
+            return {"frameId": "F1", "errorText": "net::ERR_NETWORK_ACCESS_DENIED"}
+        return original(p)
+
+    conn.on_Page_navigate = flaky
+    result, text = await call({"mode": "open", "url": "https://ex.com/"})
+    assert not result.is_error, text
+    assert sum(1 for m, _, _ in conn.sent if m == "Page.navigate") == 2
