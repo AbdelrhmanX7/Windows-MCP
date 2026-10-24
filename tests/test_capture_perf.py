@@ -416,3 +416,35 @@ class TestCachedChildControls:
             PropertyId.ScrollVerticalScrollPercentProperty,
         ):
             assert used in added
+
+
+class TestGlowCache:
+    def test_glow_is_rendered_once_per_layout(self, monkeypatch):
+        import windows_mcp.desktop.flash_overlay as flash_overlay
+
+        flash_overlay._glow_cache.clear()
+        renders = []
+        monkeypatch.setattr(
+            flash_overlay,
+            "_render_glow_rgba",
+            lambda w, h, rects, *, outward: renders.append((w, h, rects)) or object(),
+        )
+        monkeypatch.setattr(flash_overlay, "_premultiplied_bgra", lambda image, i: b"bgra")
+        rects = ((0, 0, 100, 50),)
+        assert flash_overlay._glow_bitmap(100, 50, rects) == b"bgra"
+        assert flash_overlay._glow_bitmap(100, 50, rects) == b"bgra"
+        assert len(renders) == 1
+        flash_overlay._glow_bitmap(200, 50, ((0, 0, 200, 50),))
+        assert len(renders) == 2
+        flash_overlay._glow_cache.clear()
+
+    def test_cache_is_bounded(self, monkeypatch):
+        import windows_mcp.desktop.flash_overlay as flash_overlay
+
+        flash_overlay._glow_cache.clear()
+        monkeypatch.setattr(flash_overlay, "_render_glow_rgba", lambda *a, **k: object())
+        monkeypatch.setattr(flash_overlay, "_premultiplied_bgra", lambda image, i: b"x")
+        for w in range(1, 10):
+            flash_overlay._glow_bitmap(w, 1, ((0, 0, w, 1),))
+        assert len(flash_overlay._glow_cache) <= flash_overlay._GLOW_CACHE_SIZE
+        flash_overlay._glow_cache.clear()

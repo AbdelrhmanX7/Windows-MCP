@@ -352,6 +352,43 @@ def _render_glow_rgba(
     return Image.alpha_composite(blurred, sharp)
 
 
+_GLOW_CACHE_SIZE = 4
+_glow_cache: "dict[tuple[int, int, tuple[tuple[int, int, int, int], ...]], bytes]" = {}
+_glow_cache_lock = threading.Lock()
+
+
+def _glow_bitmap(
+    width: int, height: int, local_rects: tuple[tuple[int, int, int, int], ...]
+) -> bytes:
+    """Return the premultiplied BGRA glow for this layout, rendering it only once.
+
+    Blurring and premultiplying a full-screen layer costs ~100 ms or more and the
+    flash geometry rarely changes between captures, so the bytes are kept in a small
+    cache. The fade is driven by the layered window's constant alpha, so one bitmap
+    serves every frame.
+
+    Args:
+        width: Overlay window width in pixels.
+        height: Overlay window height in pixels.
+        local_rects: Glow rects in window-local coordinates.
+
+    Returns:
+        Premultiplied BGRA bytes for ``_push_bitmap``.
+    """
+    key = (width, height, local_rects)
+    with _glow_cache_lock:
+        cached = _glow_cache.get(key)
+    if cached is not None:
+        return cached
+    glow_rgba = _render_glow_rgba(width, height, list(local_rects), outward=False)
+    bgra = _premultiplied_bgra(glow_rgba, 1.0)
+    with _glow_cache_lock:
+        if len(_glow_cache) >= _GLOW_CACHE_SIZE:
+            _glow_cache.pop(next(iter(_glow_cache)))
+        _glow_cache[key] = bgra
+    return bgra
+
+
 # ---------------------------------------------------------------------------
 # Window management
 # ---------------------------------------------------------------------------
@@ -545,10 +582,11 @@ def _run_overlay(
             _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE | _SWP_SHOWWINDOW,
         )
 
-        glow_rgba = _render_glow_rgba(width, height, local_rects, outward=False)
-        # Premultiply once; the fade is driven by the layered window's constant alpha, so a
-        # frame costs one bitmap upload instead of re-premultiplying the whole screen.
-        glow_bgra = _premultiplied_bgra(glow_rgba, 1.0)
+        if overlay.stop_event.is_set():
+            return
+        glow_bgra = _glow_bitmap(width, height, tuple(local_rects))
+        if overlay.stop_event.is_set():
+            return
 
         logger.info(
             "screenshot flash overlay started: %dx%d layered window at (%d,%d) for %d rect(s)",
