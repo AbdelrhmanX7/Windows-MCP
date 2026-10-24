@@ -540,3 +540,15 @@ def test_cdp_connection_matches_replies_and_buffers_events():
         time.sleep(0.01)
     with pytest.raises(CDPDisconnected):
         conn.send("Echo.it")
+
+
+def test_warm_is_opt_in(monkeypatch, svc, conn):
+    monkeypatch.delenv("WINDOWS_MCP_BROWSER_WARM", raising=False)
+    assert browser_tools.start_warm() is None
+    monkeypatch.setenv("WINDOWS_MCP_BROWSER_WARM", "1")
+    thread = browser_tools.start_warm()
+    thread.join(5)
+    assert (
+        svc.session == "S1"
+        and ("Target.attachToTarget", {"targetId": "T1", "flatten": True}, None) in conn.sent
+    )

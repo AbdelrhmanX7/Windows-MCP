@@ -221,12 +221,13 @@ def ensure_browser(url: str | None = None) -> tuple[dict, bool]:
         pass
     proc = launch(exe, port, profile, url)
     deadline = time.monotonic() + LAUNCH_TIMEOUT
-    next_probe = time.monotonic() + 0.5
     while time.monotonic() < deadline:
-        now = time.monotonic()
-        if marker.exists() or now >= next_probe:
-            next_probe = now + 0.25
-            info = probe(port, timeout=0.5) if listening(port) is not False else None
+        # A ready browser answers in ~5 ms, so short probes poll fast even when a port
+        # forwarder accepts connections early; Chrome's DevToolsActivePort file (Edge does
+        # not always write it) means "listening now", so give that probe longer.
+        ready = marker.exists()
+        if listening(port) is not False:
+            info = probe(port, timeout=0.5 if ready else 0.06)
             if info:
                 return info, True
         if proc.poll() is not None and proc.returncode not in (0, None):

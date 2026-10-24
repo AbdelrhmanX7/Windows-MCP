@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import threading
 import time
 import urllib.parse
 from typing import Any, Literal
@@ -435,7 +438,31 @@ def _int(value: Any, name: str, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, n))
 
 
+def _warm() -> None:
+    """Attach to (or launch) the browser in the background so the first call is warm."""
+    try:
+        from windows_mcp.browser.service import get_service
+
+        svc = get_service()
+        with svc.lock:
+            svc.page()
+    except Exception:
+        logging.getLogger(__name__).info("Browser warm-up failed", exc_info=True)
+
+
+def start_warm() -> threading.Thread | None:
+    """``WINDOWS_MCP_BROWSER_WARM=1``: warm the browser connection at server start."""
+    raw = os.getenv("WINDOWS_MCP_BROWSER_WARM", "").strip().lower()
+    if raw not in ("1", "true", "yes", "on"):
+        return None
+    thread = threading.Thread(target=_warm, name="browser-warm", daemon=True)
+    thread.start()
+    return thread
+
+
 def register(mcp, *, get_desktop, get_analytics):
+    start_warm()
+
     @mcp.tool(
         name="Browser",
         description=DESCRIPTION,

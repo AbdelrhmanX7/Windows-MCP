@@ -130,6 +130,7 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `WINDOWS_MCP_BROWSER_PORT` | `9222` | DevTools port the Browser tool attaches to, or launches the browser with. Resolved in `browser/launcher.py`. |
 | `WINDOWS_MCP_BROWSER_PROFILE` | platformdirs user data dir `browser-profile/` | Persistent `--user-data-dir` for the launched browser (logins/cookies stick). Resolved in `browser/launcher.py`. |
 | `WINDOWS_MCP_BROWSER_ARGS` | _(none)_ | Extra launch flags, whitespace separated (e.g. `--headless=new`). Resolved in `browser/launcher.py`. |
+| `WINDOWS_MCP_BROWSER_WARM` | _(off)_ | `1`/`true`/`yes`/`on`: attach to (or launch) the browser in a background thread at server start, so the first `Browser` call skips the ~0.6 s launch. Resolved in `tools/browser.py`. |
 | `WINDOWS_MCP_BROWSER_SEARCH` | `bing` | Default `Browser(mode="search")` engine: `bing`, `google`, `duckduckgo`. Resolved in `browser/service.py`. |
 | `WINDOWS_MCP_POWERSHELL_SESSION` | `on` | Set to `off`/`0`/`false`/`no` to start a fresh PowerShell process per command instead of using the persistent session. Session semantics (state reset per command, timeout/respawn, one-shot fallback) are documented in `powershell/session.py`; resolved in `powershell/service.py`. |
 | `WINDOWS_MCP_DO_MODEL` | `anthropic:claude-haiku-5-5` | `Do` inner model, `provider:model` (`anthropic`, `openrouter`, `script`); `off` disables. Keys from `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`. Resolved in `models/config.py`. |

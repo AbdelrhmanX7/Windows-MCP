@@ -837,6 +837,7 @@ sampling filters transient readings but cannot distinguish persistent query fail
 | `WINDOWS_MCP_BROWSER_PORT` | `9222` | DevTools port to attach to; a launched browser listens on it. |
 | `WINDOWS_MCP_BROWSER_PROFILE` | platformdirs user data dir `browser-profile/` | Persistent profile for the launched browser, so logins and cookies stick between runs. |
 | `WINDOWS_MCP_BROWSER_ARGS` | _(none)_ | Extra launch flags, whitespace separated. |
+| `WINDOWS_MCP_BROWSER_WARM` | _(off)_ | `1`/`true`/`yes`/`on` attaches to (or launches) the browser in the background at server start, so the first web command is warm. |
 | `WINDOWS_MCP_BROWSER_SEARCH` | `bing` | Default search engine: `bing`, `google` or `duckduckgo`. |
 
 ### Scam guard
