@@ -34,7 +34,9 @@ def get_value(path: str, name: str) -> str:
     return f'Registry value [{path}] "{name}" = {response.strip()}'
 
 
-def set_value(path: str, name: str, value: str, reg_type: RegistryType = 'String') -> str:
+def set_value(
+    path: str, name: str, value: str, reg_type: RegistryType = 'String', elevated: bool = False
+) -> str:
     """Create or update a registry value, creating the key if it does not exist."""
     if reg_type not in ALLOWED_REGISTRY_TYPES:
         return (
@@ -48,24 +50,24 @@ def set_value(path: str, name: str, value: str, reg_type: RegistryType = 'String
         f"if (-not (Test-Path -LiteralPath {q_path})) {{ New-Item -Path {q_path} -Force | Out-Null }}; "
         f"Set-ItemProperty -LiteralPath {q_path} -Name {q_name} -Value {q_value} -Type {reg_type} -Force"
     )
-    response, status = PowerShellExecutor.execute_command(command)
+    response, status = PowerShellExecutor.execute_command(command, elevated=elevated)
     if status != 0:
         return f'Error writing registry: {response.strip()}'
     return f'Registry value [{path}] "{name}" set to "{value}" (type: {reg_type}).'
 
 
-def delete_entry(path: str, name: str | None = None) -> str:
+def delete_entry(path: str, name: str | None = None, elevated: bool = False) -> str:
     """Delete a registry value when *name* is provided, otherwise remove the entire key."""
     q_path = ps_quote(path)
     if name:
         q_name = ps_quote(name)
         command = f"Remove-ItemProperty -LiteralPath {q_path} -Name {q_name} -Force"
-        response, status = PowerShellExecutor.execute_command(command)
+        response, status = PowerShellExecutor.execute_command(command, elevated=elevated)
         if status != 0:
             return f'Error deleting registry value: {response.strip()}'
         return f'Registry value [{path}] "{name}" deleted.'
     command = f"Remove-Item -LiteralPath {q_path} -Recurse -Force"
-    response, status = PowerShellExecutor.execute_command(command)
+    response, status = PowerShellExecutor.execute_command(command, elevated=elevated)
     if status != 0:
         return f'Error deleting registry key: {response.strip()}'
     return f'Registry key [{path}] deleted.'

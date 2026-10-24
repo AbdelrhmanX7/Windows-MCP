@@ -101,6 +101,37 @@ This creates a per-user Scheduled Task named `windows-mcp-server` and a wrapper 
 `~/.windows-mcp/start-server.cmd`. Use `windows-mcp uninstall` to remove it. Logs are written
 to `~/.windows-mcp/server.log` and `~/.windows-mcp/server.error.log`.
 
+### Admin mode (run elevated, no babysitting)
+
+For admin tasks — install software (winget/msiexec), manage services, write `HKLM`, firewall
+rules, scheduled tasks, drivers/features, edit `Program Files`, and drive elevated windows
+(regedit, services.msc) — run the whole server elevated with **no UAC prompt each time**:
+
+```shell
+windows-mcp install-elevated            # self-elevates once, registers no-prompt tasks
+windows-mcp run-elevated --task         # start the elevated server (127.0.0.1:8000, streamable-http)
+windows-mcp uninstall-elevated          # remove the tasks
+```
+
+An elevated server can drive elevated windows over UIA (a non-elevated process cannot). The
+backend then connects to `http://127.0.0.1:8000/mcp/` instead of stdio.
+
+If you prefer to keep the server non-elevated, individual calls can still run elevated via a
+persistent elevated worker (one UAC consent per session, or none when the worker task is
+installed):
+
+```text
+PowerShell(command="winget install --silent 7zip.7zip --accept-source-agreements", elevated=true)
+Registry(mode="set", path="HKLM:\\SOFTWARE\\Acme", name="Flag", value="1", elevated=true)
+Process(mode="kill", pid=1234, elevated=true)
+FileSystem(mode="write", path="C:\\Program Files\\Acme\\config.ini", content="...", elevated=true)
+```
+
+`ControlStatus()` reports `elevation.is_admin`, integrity level, UAC state and the worker.
+`windows-mcp run-elevated` (without `--task`) elevates a single server ad-hoc via `runas`.
+See [docs/INTEGRATION.md §11](docs/INTEGRATION.md) for the full flow and the
+`WINDOWS_MCP_ELEVATION` knob.
+
 <details>
   <summary>Install in Claude Desktop</summary>
 
@@ -850,6 +881,12 @@ Model specs are `provider:model`, with provider `anthropic` (key `ANTHROPIC_API_
 | `WINDOWS_MCP_MODEL_TIMEOUT` | `15` | Seconds per model request (0.5 to 120). |
 | `WINDOWS_MCP_DO_EFFORT` | `low` | Anthropic `output_config.effort` for the `Do` model (`low` to `max`, `off` omits it). |
 | `WINDOWS_MCP_DO_THINKING` | _(unset)_ | `disabled` or `adaptive` thinking for the Anthropic `Do` model; unset leaves the model default. |
+
+### Admin mode (elevation)
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_ELEVATION` | `auto` | How a tool's `elevated=true` starts the elevated worker: `auto` (the `windows-mcp-elevated-worker` task when installed, else one `runas` UAC consent), `task` (task only), `runas` (prompt only), `off` (`elevated=true` fails unless the server is already elevated). No-op when the server already runs elevated. See the Admin mode section above and `docs/INTEGRATION.md` §11. |
 
 ### Telemetry
 

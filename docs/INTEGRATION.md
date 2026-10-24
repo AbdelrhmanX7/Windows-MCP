@@ -715,3 +715,87 @@ with Decision-1 verification.
 | The steps depend on what the screen shows, but not on your judgment | The next step needs reasoning about content (reading an email, choosing a song) |
 | Speed matters more than control | You must see the result yourself before continuing |
 | Several such goals in a plan: one `Do` per screen task | Background work (files, registry, web): `RunParallel` |
+
+## 11. Admin mode (elevation)
+
+The server can do admin work — install software (winget/msiexec), manage services, write
+`HKLM`, firewall rules, scheduled tasks, drivers/features, edit `Program Files`, and drive
+elevated app windows (regedit, services.msc, an admin cmd) — in two ways.
+
+### A) Run the whole server elevated (preferred)
+
+An elevated process can drive *every* window with UIA, elevated ones included (a
+non-elevated process is blocked from sending input to elevated windows by UIPI). Register
+a per-user scheduled task that starts the server elevated with **no UAC prompt**:
+
+```shell
+windows-mcp install-elevated --host 127.0.0.1 --port 8000   # self-elevates once to register
+windows-mcp run-elevated --task                              # start it (or: schtasks /Run /TN windows-mcp-server-elevated)
+windows-mcp uninstall-elevated                               # remove the tasks
+```
+
+`install-elevated` registers two `RunLevel Highest`, `Interactive`-logon tasks for the
+current user:
+
+* `windows-mcp-server-elevated` — runs `windows-mcp serve --transport streamable-http
+  --host 127.0.0.1 --port <port>` elevated, on the user's interactive desktop. stdio is not
+  usable from a scheduled task, so the server speaks **streamable-http** (stateful/legacy,
+  so pushed `task_event`/`security_event`/control notifications still reach the backend).
+* `windows-mcp-elevated-worker` — the on-demand elevated worker for route (B).
+
+Registering a Highest task itself needs elevation, so `install-elevated` self-elevates once
+via `ShellExecute "runas"` (one consent). After that the tasks start elevated forever with
+no prompt. For ad-hoc use without installing anything, `windows-mcp run-elevated` self-
+elevates a single server once via `runas`.
+
+**Backend change:** connect to `http://127.0.0.1:<port>/mcp/` (default port 8000) instead
+of spawning the server over stdio. Everything else (legacy mode, pushed events, the Tasks
+flow) is unchanged. Confirm elevation with `ControlStatus()` → `elevation.is_admin == true`.
+
+### B) Elevated execution from a non-elevated server
+
+When the server is not itself elevated, a tool call can still run elevated through a
+**persistent elevated worker**: a small admin process started once per server session and
+reused for every later elevated call.
+
+```text
+PowerShell(command="winget install --silent 7zip.7zip --accept-source-agreements", elevated=true)
+Registry(mode="set", path="HKLM:\\SOFTWARE\\Acme", name="Flag", value="1", elevated=true)
+Process(mode="kill", pid=1234, elevated=true)
+FileSystem(mode="write", path="C:\\Program Files\\Acme\\config.ini", content="...", elevated=true)
+```
+
+The first `elevated=true` call starts the worker. If the `windows-mcp-elevated-worker` task
+is installed (route A), it starts with **no prompt**; otherwise the worker is launched via
+`runas`, which shows **one** UAC consent dialog, after which the same worker serves the
+rest of the session. When the server is already elevated, `elevated=true` is a no-op (the
+operation runs in-process). The worker exits when the server does.
+
+The UAC consent dialog runs on the secure desktop and no automation can click it — that is
+why the scheduled-task route (no prompt at all) is the main path; `runas` needs a human for
+the first consent only.
+
+### Reporting
+
+`ControlStatus()` includes an `elevation` block:
+
+```json
+{
+  "elevation": {
+    "is_admin": true,
+    "integrity": "high",
+    "uac_enabled": true,
+    "elevation_mode": "auto",
+    "elevated_worker": {"running": false, "task_installed": true, "mode": "auto"}
+  }
+}
+```
+
+The server also logs `windows-mcp elevation: is_admin=… integrity=… elevation_mode=…` at
+startup.
+
+### Environment
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_ELEVATION` | `auto` | How `elevated=true` starts the worker: `auto` (worker task if installed, else `runas`), `task` (task only), `runas` (prompt only), `off` (`elevated=true` fails unless the server is already elevated). |

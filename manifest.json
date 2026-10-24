@@ -81,7 +81,7 @@
   "tools": [
     {
       "name": "ControlStatus",
-      "description": "Reports whether AI or the user currently controls the desktop and the remaining user-idle wait before AI control can resume. This read-only status remains available during user takeover."
+      "description": "Reports whether AI or the user currently controls the desktop and the remaining user-idle wait before AI control can resume. This read-only status remains available during user takeover. Also reports server elevation (is_admin/integrity/UAC) and the elevated worker state."
     },
     {
       "name": "App",
@@ -89,11 +89,11 @@
     },
     {
       "name": "PowerShell",
-      "description": "A comprehensive system tool for executing any PowerShell commands. Use it to navigate the file system, manage files and processes, and execute system-level operations. Capable of accessing web content, interacting with network resources, and performing complex administrative tasks."
+      "description": "A comprehensive system tool for executing any PowerShell commands. Use it to navigate the file system, manage files and processes, and execute system-level operations. Capable of accessing web content, interacting with network resources, and performing complex administrative tasks. Set elevated=true to run with administrator rights (install software, services, HKLM, firewall, scheduled tasks, Program Files) via a persistent elevated worker."
     },
     {
       "name": "FileSystem",
-      "description": "Manages file system operations with eight modes: 'read' (read text file contents), 'write' (create/overwrite/append to files), 'copy' (copy files or directories), 'move' (move or rename), 'delete' (delete files or directories), 'list' (list directory contents), 'search' (find files by glob pattern), 'info' (get metadata like size, dates, type). Relative paths are resolved from the user's Desktop folder. Use absolute paths to access other locations."
+      "description": "Manages file system operations with eight modes: 'read' (read text file contents), 'write' (create/overwrite/append to files), 'copy' (copy files or directories), 'move' (move or rename), 'delete' (delete files or directories), 'list' (list directory contents), 'search' (find files by glob pattern), 'info' (get metadata like size, dates, type). Relative paths are resolved from the user's Desktop folder. Use absolute paths to access other locations. Set elevated=true to read/write in admin-only locations like Program Files."
     },
     {
       "name": "Screenshot",
@@ -157,7 +157,7 @@
     },
     {
       "name": "Process",
-      "description": "Manages system processes. Use mode=\"list\" to list running processes with filtering and sorting options. Use mode=\"kill\" to terminate processes by PID or name."
+      "description": "Manages system processes. Use mode=\"list\" to list running processes with filtering and sorting options. Use mode=\"kill\" to terminate processes by PID or name. Set elevated=true to kill elevated or other-user processes."
     },
     {
       "name": "Notification",
@@ -165,7 +165,7 @@
     },
     {
       "name": "Registry",
-      "description": "Accesses the Windows Registry. Use mode=\"get\" to read a value, mode=\"set\" to create/update a value, mode=\"delete\" to remove a value or key, mode=\"list\" to list values and sub-keys under a path."
+      "description": "Accesses the Windows Registry. Use mode=\"get\" to read a value, mode=\"set\" to create/update a value, mode=\"delete\" to remove a value or key, mode=\"list\" to list values and sub-keys under a path. Set elevated=true for HKLM/admin-only writes and deletes."
     },
     {
       "name": "Apps",
