@@ -16,6 +16,7 @@ from windows_mcp.tree.service import Tree
 from windows_mcp.desktop import screenshot as screenshot_capture
 from windows_mcp.desktop.control import get_controller
 from windows_mcp.desktop import flash_overlay
+from windows_mcp.desktop.input_timing import click_guard, wait_for_foreground_at
 from windows_mcp.infrastructure import safe_get
 from windows_mcp.desktop import control_overlay
 from urllib.parse import urljoin
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 import windows_mcp.uia as uia  # noqa: E402
+from windows_mcp.uia.settle import input_settle_seconds  # noqa: E402
 
 # Key name aliases for shortcut keys that differ from UIA SpecialKeyNames
 _KEY_ALIASES = {
@@ -784,26 +786,34 @@ class Desktop:
             return
         match button:
             case "left":
+                # Only the first press is guarded: the presses of one multi-click are
+                # meant to merge, so they keep the half-double-click-time spacing.
+                click_guard.before_click(x, y, "left")
                 if clicks >= 2:
                     dbl_wait = uia.GetDoubleClickTime() / 2000.0
                     for i in range(clicks):
                         owner.checkpoint_current()
-                        uia.Click(x, y, waitTime=dbl_wait if i < clicks - 1 else 0.5)
+                        uia.Click(x, y, waitTime=dbl_wait if i < clicks - 1 else None)
                         owner.record_step_current()
                 else:
                     owner.checkpoint_current()
                     uia.Click(x, y)
                     owner.record_step_current()
+                click_guard.after_click(x, y, "left")
             case "right":
                 for _ in range(clicks):
+                    click_guard.before_click(x, y, "right")
                     owner.checkpoint_current()
                     uia.RightClick(x, y)
                     owner.record_step_current()
+                    click_guard.after_click(x, y, "right")
             case "middle":
                 for _ in range(clicks):
+                    click_guard.before_click(x, y, "middle")
                     owner.checkpoint_current()
                     uia.MiddleClick(x, y)
                     owner.record_step_current()
+                    click_guard.after_click(x, y, "middle")
 
     # Strings longer than this typed via clipboard paste instead of
     # per-key SendKeys. SendKeys at high cadence loses keystrokes on
@@ -829,8 +839,14 @@ class Desktop:
         owner.checkpoint_current()
         x, y = loc
         self._validate_screen_point(x, y)
+        click_guard.before_click(x, y, "left")
         uia.Click(x, y)
+        click_guard.after_click(x, y, "left")
         owner.record_step_current()
+        # The keys are queued behind the click, so they cannot overtake it; what can
+        # go wrong is typing while the clicked window is still being activated.
+        # Poll for that (bounded) instead of the old blind 0.5 s sleep.
+        wait_for_foreground_at(x, y)
         if caret_position == "start":
             owner.checkpoint_current()
             uia.SendKeys("{Home}", waitTime=0.05)
@@ -840,7 +856,9 @@ class Desktop:
             uia.SendKeys("{End}", waitTime=0.05)
             owner.record_step_current()
         if clear:
-            sleep(0.5)
+            # Focus was already awaited after the click; one settle lets the caret
+            # land before Ctrl+A selects the field.
+            sleep(input_settle_seconds())
             owner.checkpoint_current()
             uia.SendKeys("{Ctrl}a", waitTime=0.05)
             owner.record_step_current()
@@ -855,9 +873,10 @@ class Desktop:
         else:
             # Bump interval from 0.02 → 0.04. Keeps short-text speed acceptable
             # while reducing key-loss; each character is a cancellation point.
+            # waitTime=None adds the configured settle on top of the interval.
             for ch in text:
                 owner.checkpoint_current()
-                uia.SendKeys(_escape_text_for_sendkeys(ch), interval=0.04, waitTime=0.05)
+                uia.SendKeys(_escape_text_for_sendkeys(ch), interval=0.04, waitTime=None)
                 owner.record_step_current()
         if press_enter:
             owner.checkpoint_current()
@@ -991,7 +1010,8 @@ class Desktop:
         )
         effective_duration = self._normalize_drag_duration(duration)
         owner.checkpoint_current()
-        sleep(0.5)
+        # Let the previous action settle before the button goes down.
+        sleep(input_settle_seconds())
         owner.checkpoint_current()
         if normalized_from_loc is None:
             cx, cy = uia.GetCursorPos()
@@ -1061,10 +1081,13 @@ class Desktop:
                     lambda: owner.physical_key_down(uia.Keys.VK_CONTROL),
                 )
             for x, y in points:
+                click_guard.before_click(x, y, "left")
                 owner.checkpoint_current()
-                uia.Click(x, y, waitTime=0.2)
+                uia.Click(x, y)
+                click_guard.after_click(x, y, "left")
                 owner.record_step_current()
-                sleep(0.5)
+                # Give the list a moment to apply the selection before the next click.
+                sleep(input_settle_seconds())
         finally:
             if press_ctrl:
                 owner.input_ledger.release("key:ctrl")
