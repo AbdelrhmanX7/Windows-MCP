@@ -207,7 +207,11 @@ def tools(monkeypatch):
     holder = {"events": [(0, EDGE)]}
 
     def sample(deep: bool = False) -> Sample:
-        return timeline(clock, holder["events"])(deep)
+        # Offsets count from the first sample after the events were set.
+        if holder.get("built") is not holder["events"]:
+            holder["built"] = holder["events"]
+            holder["fn"] = timeline(clock, holder["events"])
+        return holder["fn"](deep)
 
     fake = Readiness(sample=sample, clock=clock, sleep=clock.sleep, timeout=lambda: 3.0)
     monkeypatch.setattr(input_tools, "readiness", fake)
