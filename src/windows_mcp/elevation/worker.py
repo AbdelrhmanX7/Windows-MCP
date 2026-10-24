@@ -58,7 +58,14 @@ def _target(spec: str):
 
 
 def _hello() -> dict:
-    return {"pid": os.getpid(), "is_admin": is_admin(), "integrity": integrity_level()}
+    # Must never raise: a failed hello would end the connection thread silently and
+    # leave the server waiting for a worker that is already gone.
+    try:
+        integrity = integrity_level()
+    except Exception:  # noqa: BLE001
+        logger.debug("integrity_level failed", exc_info=True)
+        integrity = "unknown"
+    return {"pid": os.getpid(), "is_admin": is_admin(), "integrity": integrity}
 
 
 # Operations a server may ask for. Module functions are resolved lazily, so the worker

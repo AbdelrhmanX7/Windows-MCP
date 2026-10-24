@@ -28,17 +28,29 @@ def _query_token(info_class: int, size: int = 64) -> ctypes.Array | None:
     """Return the raw ``GetTokenInformation`` buffer for this process, or None."""
     if sys.platform != "win32":
         return None
+    HANDLE, DWORD = ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD
+    # Private DLL objects so these prototypes never clash with ctypes.windll users.
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
-    token = ctypes.wintypes.HANDLE()
+    # GetCurrentProcess returns the (HANDLE)-1 pseudo-handle; without explicit
+    # prototypes ctypes passes it as a C int and overflows.
+    kernel32.GetCurrentProcess.restype = HANDLE
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.CloseHandle.argtypes = [HANDLE]
+    advapi32.OpenProcessToken.argtypes = [HANDLE, DWORD, ctypes.POINTER(HANDLE)]
+    advapi32.OpenProcessToken.restype = ctypes.wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        HANDLE, ctypes.c_int, ctypes.c_void_p, DWORD, ctypes.POINTER(DWORD)
+    ]
+    advapi32.GetTokenInformation.restype = ctypes.wintypes.BOOL
+    token = HANDLE()
     if not advapi32.OpenProcessToken(
         kernel32.GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(token)
     ):
         return None
     try:
         buf = ctypes.create_string_buffer(size)
-        needed = ctypes.wintypes.DWORD()
+        needed = DWORD()
         if not advapi32.GetTokenInformation(
             token, info_class, buf, size, ctypes.byref(needed)
         ):
@@ -66,12 +78,14 @@ def integrity_level() -> str:
 
     Returns ``"unknown"`` when the token cannot be read (not Windows, API failure).
     """
-    buf = _query_token(_TOKEN_INTEGRITY_LEVEL)
-    if buf is None:
-        return "unknown"
     try:
-        advapi32 = ctypes.windll.advapi32
+        buf = _query_token(_TOKEN_INTEGRITY_LEVEL)
+        if buf is None:
+            return "unknown"
+        advapi32 = ctypes.WinDLL("advapi32")
+        advapi32.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
         advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+        advapi32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, ctypes.wintypes.DWORD]
         advapi32.GetSidSubAuthority.restype = ctypes.POINTER(ctypes.wintypes.DWORD)
         # TOKEN_MANDATORY_LABEL starts with SID_AND_ATTRIBUTES whose first field is the
         # SID pointer.

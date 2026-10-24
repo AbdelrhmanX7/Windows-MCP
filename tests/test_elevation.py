@@ -15,6 +15,12 @@ from windows_mcp.elevation import setup, worker
 from windows_mcp.elevation.client import ElevatedWorker, ElevationUnavailable, call_elevated
 
 
+def _recv(conn, timeout: float = 10.0):
+    """recv() that fails the test instead of hanging when nothing arrives."""
+    assert conn.poll(timeout), "no message from the worker"
+    return conn.recv()
+
+
 def _serve(conn) -> threading.Thread:
     thread = threading.Thread(target=worker.serve_connection, args=(conn,), daemon=True)
     thread.start()
@@ -35,12 +41,12 @@ def test_ops_cover_every_tool_entry_point() -> None:
 def test_worker_hello_and_ping_round_trip() -> None:
     server_end, worker_end = Pipe()
     _serve(worker_end)
-    tag, info = server_end.recv()
+    tag, info = _recv(server_end)
     assert tag == "hello"
     assert set(info) == {"pid", "is_admin", "integrity"}
 
     server_end.send((7, "ping", (), {}))
-    request_id, ok, payload = server_end.recv()
+    request_id, ok, payload = _recv(server_end)
     assert (request_id, ok) == (7, True)
     assert payload["pid"] == info["pid"]
     server_end.close()
@@ -49,17 +55,17 @@ def test_worker_hello_and_ping_round_trip() -> None:
 def test_worker_reports_failure_without_dropping_the_connection() -> None:
     server_end, worker_end = Pipe()
     _serve(worker_end)
-    server_end.recv()  # hello
+    _recv(server_end)  # hello
 
     server_end.send((1, "does-not-exist", (), {}))
-    request_id, ok, payload = server_end.recv()
+    request_id, ok, payload = _recv(server_end)
     assert request_id == 1
     assert ok is False
     assert "unknown elevated operation" in payload
 
     # A later valid call still works: one failed request must not kill the worker.
     server_end.send((2, "ping", (), {}))
-    assert server_end.recv()[0] == 2
+    assert _recv(server_end)[0] == 2
     server_end.close()
 
 
@@ -70,7 +76,7 @@ def _connected_worker(monkeypatch) -> tuple[ElevatedWorker, object]:
     w = ElevatedWorker()
     # Pretend the worker already connected and sent a hello.
     w._conn = server_end
-    assert server_end.recv()[0] == "hello"
+    assert _recv(server_end)[0] == "hello"
     w._info = {"pid": 1, "is_admin": True, "integrity": "high"}
     w._launched_by = "task"
     w._reader = threading.Thread(target=w._read_loop, daemon=True)
