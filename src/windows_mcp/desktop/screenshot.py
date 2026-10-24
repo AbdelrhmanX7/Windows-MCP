@@ -207,7 +207,20 @@ class _DxcamBackend(_ScreenshotBackend):
         frame = camera.grab(region=region, copy=True, new_frame_only=False)
         if frame is None:
             raise RuntimeError("DXGI capture returned no frame")
-        return Image.fromarray(frame)
+        image = Image.fromarray(frame)
+        # dxcam addresses outputs per adapter, so a stale or mismatched output can hand
+        # back another monitor's pixels without raising (issue #416). A frame whose size
+        # differs from the requested rect is never the right picture; raise so the chain
+        # falls through to a backend that captures by desktop coordinates instead. Empty
+        # frames are left to _is_usable_capture, which retires the backend (issue #371).
+        expected_size = (capture_rect.width(), capture_rect.height())
+        if image.width > 0 and image.height > 0 and image.size != expected_size:
+            raise RuntimeError(
+                f"DXGI capture returned a {image.width}x{image.height} frame for a "
+                f"{expected_size[0]}x{expected_size[1]} region "
+                f"(device={device_idx}, output={output_idx})"
+            )
+        return image
 
 
 class _PillowBackend(_ScreenshotBackend):
