@@ -15,7 +15,8 @@ Signals, all cheap enough to read after every action:
   navigation starts until the page's load event, including the pre-commit gap where the
   old document is still shown and nothing else changes (3 s for a cold todomvc.com load
   on the test VM). The element is found once per window (10-35 ms) and cached; a read is
-  about 0.5 ms. While waiting, the page document's ``aria busy=true`` is checked too.
+  about 0.5 ms. Web content itself is not queried while it loads (polling the page's
+  tree slowed the load).
 * The global cursor: the hourglass (``IDC_WAIT``) counts as busy.
 
 Nothing is waited for when nothing changed: an action that leaves the foreground window,
@@ -71,10 +72,7 @@ WAIT_IDLE_S = 0.1
 _TREE_SCOPE_DESCENDANTS = 4
 _PROP_NAME = 30005
 _PROP_CLASS_NAME = 30012
-_PROP_CONTROL_TYPE = 30003
-_PROP_ARIA_PROPERTIES = 30102
 _PROP_FULL_DESCRIPTION = 30159
-_UIA_DOCUMENT = 50030
 _RELOAD_CLASS = "ReloadButton"
 # Seconds a window without a reload button is remembered as such (Firefox, app windows).
 _NEGATIVE_CACHE_S = 5.0
@@ -153,8 +151,6 @@ class UiProbe:
         # hwnd -> (reload button element or None, time it was looked up)
         self._reload: dict[int, tuple[object | None, float]] = {}
         self._idle_signature: dict[int, str] = {}
-        self._documents: dict[int, object] = {}
-        self._doc_cond = None
         self._reload_cond = None
         self._wait_cursor: int | None = None
 
@@ -186,35 +182,6 @@ class UiProbe:
         self._reload[hwnd] = (element, now)
         return element
 
-    def _document_busy(self, hwnd: int) -> bool:
-        client = self._uia()
-        for attempt in range(2):
-            doc = self._documents.get(hwnd)
-            if doc is None:
-                if self._doc_cond is None:
-                    self._doc_cond = client.CreatePropertyCondition(
-                        _PROP_CONTROL_TYPE, _UIA_DOCUMENT
-                    )
-                try:
-                    root = client.ElementFromHandle(hwnd)
-                    doc = root.FindFirst(_TREE_SCOPE_DESCENDANTS, self._doc_cond) if root else None
-                except Exception:
-                    doc = None
-                if not doc:
-                    return False
-                if len(self._documents) > 64:
-                    self._documents.clear()
-                self._documents[hwnd] = doc
-            try:
-                aria = doc.GetCurrentPropertyValue(_PROP_ARIA_PROPERTIES)
-                return isinstance(aria, str) and "busy=true" in aria
-            except Exception:
-                # The document is swapped out during a navigation; look it up again.
-                self._documents.pop(hwnd, None)
-                if attempt:
-                    return False
-        return False
-
     def browser_loading(self, hwnd: int, deep: bool = False) -> bool:
         """Is the browser window's active tab loading?"""
         for attempt in range(2):
@@ -237,7 +204,9 @@ class UiProbe:
             if signature != idle:
                 return True
             break
-        return self._document_busy(hwnd) if deep else False
+        # Web-content UIA queries (the document's aria busy) are not polled: walking a
+        # loading page's tree every 20 ms slowed the load itself on the test VM.
+        return False
 
     def _cursor_busy(self) -> bool:
         class CURSORINFO(ctypes.Structure):

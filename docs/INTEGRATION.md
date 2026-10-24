@@ -122,9 +122,8 @@ to run concurrently.
 | `Apps` / `AppSkill` | background; `AppSkill(generate/regenerate=true)`: screen | Available. Per-app skills (URI schemes, CLI/COM recipes, known shortcuts) so the planner can do common app actions without UI exploration. |
 
 **Actions return when the UI is ready.** `Click`, `Type(press_enter=true)`, `Shortcut` and
-`App` launch wait (bounded by `WINDOWS_MCP_READY_TIMEOUT`, default 3 s, polling every 30 ms)
-for what they started: a browser page load (Edge/Chrome reload button in its "Stop" state, the
-document's `busy`), a dialog or window taking the foreground, a title change. The result says
+`App` launch wait (bounded by `WINDOWS_MCP_READY_TIMEOUT`, default 3 s, polling every 20 ms)
+for what they started: a browser page load (Edge/Chrome reload button in its "Stop" state), a dialog or window taking the foreground, a title change. The result says
 what happened, e.g. `Typed ... Enter pressed. Page loaded: "todo list - Search" (0.8 s).` or
 `Pressed ctrl+s. Window "Save As" is now in front (0.1 s).` A page whose new document is up
 but whose load event lags (search results loading ads) returns 0.6 s after it appeared as
