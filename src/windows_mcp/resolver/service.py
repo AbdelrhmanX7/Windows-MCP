@@ -244,7 +244,9 @@ class Resolver:
 
         tier = "uia"
         best, confidence, note = ranking.best, ranking.confidence, ranking.note
-        if best is None or confidence < min_conf or element_count < SPARSE_WINDOW_ELEMENTS:
+        # Tier 2 only when tier 1 is not confident: a certain accessibility match must
+        # never be replaced by a guess, nor cause a screenshot to leave the machine.
+        if best is None or confidence < min_conf:
             picked = self._vision(target, root, ranking.candidates, element_count, notes)
             if picked is not None:
                 tier, best, confidence, note = "vision", picked, picked.score, ""

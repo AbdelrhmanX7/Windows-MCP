@@ -414,6 +414,21 @@ def test_tier2_uses_tier1_candidates_as_boxes(monkeypatch):
     assert result.best.name == result.candidates[1].name
 
 
+def test_tier2_not_consulted_when_tier1_is_confident_in_a_sparse_window(monkeypatch):
+    calls = []
+    monkeypatch.setattr(requests, "post", lambda *a, **k: calls.append(1))
+    desktop = FakeDesktop()
+    resolver = Resolver(
+        desktop,
+        source=FakeSource({100: [cand("OK", x=100), cand("Cancel", x=200)]}),
+        env={"WINDOWS_MCP_RESOLVER_VISION": "anthropic", "ANTHROPIC_API_KEY": "k"},
+    )
+    monkeypatch.setattr(resolver, "_window_rect", lambda root: (0, 0, 800, 600))
+    result = resolver.resolve("OK")
+    assert result.ok and result.tier == "uia"
+    assert calls == [] and desktop.shots == 0
+
+
 @pytest.mark.parametrize(
     "behavior",
     [
