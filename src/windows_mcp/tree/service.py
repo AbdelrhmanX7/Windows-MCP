@@ -7,15 +7,25 @@ from windows_mcp.tree.cache_utils import (
     CachedControlHelper,
     is_uia_dead_element_error,
 )
-from windows_mcp.tree.budget import TreeElementBudget, resolve_max_tree_elements
+from windows_mcp.tree.budget import (
+    WINDOW_CUT_TIME,
+    TreeElementBudget,
+    resolve_max_tree_elements,
+    resolve_max_window_elements,
+    resolve_window_time_budget,
+)
 from windows_mcp.tree.utils import random_point_within_bounding_box
 from windows_mcp.tree import ia2 as ia2_traversal
 from typing import TYPE_CHECKING,Optional,Any
 from time import sleep,perf_counter
 from _ctypes import COMError
 from psutil import Process
+from functools import cache
 import logging
+import re
+import unicodedata
 import weakref
+import win32gui
 import win32process
 import os
 
@@ -68,6 +78,113 @@ def _window_process_name(handle: int) -> Optional[str]:
         return None
 
 
+# Ancestors at or above these are the user's shell or the OS, never the MCP host. The
+# parent walk stops at the first one: skipping explorer.exe would drop the taskbar and
+# the desktop from every capture of a server launched from a shell.
+_HOST_CHAIN_STOP_NAMES = frozenset(
+    {
+        "explorer.exe",
+        "svchost.exe",
+        "services.exe",
+        "wininit.exe",
+        "winlogon.exe",
+        "userinit.exe",
+        "sihost.exe",
+        "csrss.exe",
+        "smss.exe",
+        "system",
+    }
+)
+
+
+def _skip_host_processes_enabled(env: "os._Environ[str] | dict[str, str] | None" = None) -> bool:
+    """Whether windows of the MCP host's process chain are kept out of the tree walk.
+
+    Args:
+        env: Mapping to read from. Defaults to ``os.environ``.
+
+    Returns:
+        False only when ``WINDOWS_MCP_SKIP_HOST_PROCESSES`` is ``0``/``false``/``no``/
+        ``off``; on by default.
+    """
+    source = os.environ if env is None else env
+    value = source.get("WINDOWS_MCP_SKIP_HOST_PROCESSES", "")
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _pids_with_visible_windows() -> frozenset[int]:
+    """Return the PIDs that own a visible top-level window, using Win32 only."""
+    pids: set[int] = set()
+
+    def callback(hwnd: int, _: Any) -> bool:
+        try:
+            if win32gui.IsWindowVisible(hwnd):
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if pid:
+                    pids.add(pid)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumWindows(callback, None)
+    except Exception:
+        return frozenset()
+    return frozenset(pids)
+
+
+@cache
+def _host_process_ids() -> frozenset[int]:
+    """Return the PIDs of the processes that launched this server.
+
+    Walks the parent chain of the current process (e.g. ``uvx`` -> ``Code.exe`` for an
+    MCP server started by VS Code) and stops after the first ancestor that owns a
+    visible top-level window: that is the host. Whatever launched the host (a browser
+    that opened a ``vscode://`` link, a launcher) is a separate app the user may want
+    to automate. The walk also stops before any shell or system process in
+    ``_HOST_CHAIN_STOP_NAMES``. The server's own PID is not included; its windows are
+    already filtered out by ``Desktop.get_controls_handles``. Cached because the host
+    chain cannot change while the server is running.
+
+    Returns:
+        The ancestor PIDs, or an empty set when the chain cannot be read.
+    """
+    pids: set[int] = set()
+    names: list[str] = []
+    try:
+        parents = Process(os.getpid()).parents()
+    except Exception:
+        return frozenset()
+    windowed_pids = _pids_with_visible_windows()
+    for parent in parents:
+        try:
+            name = parent.name()
+        except Exception:
+            break
+        if name.casefold() in _HOST_CHAIN_STOP_NAMES:
+            break
+        pids.add(parent.pid)
+        names.append(name)
+        if parent.pid in windowed_pids:
+            break
+    if names:
+        logger.info(
+            "[Tree] Skipping UIA traversal of MCP host processes: %s "
+            "(set WINDOWS_MCP_SKIP_HOST_PROCESSES=off to include them)",
+            " <- ".join(names),
+        )
+    return frozenset(pids)
+
+
+def _window_process_id(handle: int) -> Optional[int]:
+    """Return the PID that owns `handle` using Win32 only, or None if it cannot be read."""
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(handle)
+    except Exception:
+        return None
+    return pid or None
+
+
 def _is_comtypes_variant_ord_typeerror(error: TypeError) -> bool:
     message = str(error)
     if _COMTYPES_ORD_TYPEERROR_FRAGMENT not in message:
@@ -95,10 +212,84 @@ def _runtime_identity(node: Any) -> Optional[tuple[int, ...]]:
         return None
     return parts or None
 
+
+# Scripts written without spaces between words. UIA's TextUnit.Word yields one range per glyph
+# for these, so an Electron/Chromium document would otherwise emit one `Word` node per character.
+_UNSPACED_SCRIPT_RE = re.compile(
+    "[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f"
+    "\U00020000-\U0003134f]"
+)
+
+
+def _is_unspaced_char(char: str) -> bool:
+    return _UNSPACED_SCRIPT_RE.match(char) is not None
+
+
+def _is_punctuation_char(char: str) -> bool:
+    return unicodedata.category(char).startswith("P")
+
+
+def _should_join_words(prev_word: str, prev_rect: Rect, word: str, rect: Rect) -> bool:
+    """Return True when `word` continues the unspaced (CJK/kana) run ending in `prev_word`."""
+    tail, head = prev_word[-1], word[0]
+    if not (_is_unspaced_char(tail) or _is_unspaced_char(head)):
+        return False
+    if not (_is_unspaced_char(tail) or _is_punctuation_char(tail)):
+        return False
+    if not (_is_unspaced_char(head) or _is_punctuation_char(head)):
+        return False
+    min_height = min(prev_rect.height(), rect.height())
+    if min_height <= 0:
+        return False
+    # Same visual line: the boxes overlap vertically by at least half the shorter one.
+    overlap = min(prev_rect.bottom, rect.bottom) - max(prev_rect.top, rect.top)
+    if overlap * 2 < min_height:
+        return False
+    # Horizontally adjacent (glyphs abut); symmetric so RTL-ordered ranges also join.
+    gap = max(rect.left - prev_rect.right, prev_rect.left - rect.right)
+    return gap <= max(2, min_height // 2)
+
+
+def _merge_unspaced_word_runs(word_elements: list[tuple[str, Rect]]) -> list[tuple[str, Rect]]:
+    """Collapse per-glyph word ranges of unspaced scripts into one entry per visual run.
+
+    Adjacent CJK/kana glyphs on the same line (and punctuation touching them) are joined into a
+    single word whose rect is the union of the parts. Text in spaced scripts (Latin, Cyrillic,
+    Hangul, ...) is returned unchanged, so per-word click targets are kept there.
+
+    Args:
+        word_elements: (word, rect) pairs in document order, as built from
+            `GetAllWordBoundingBoxes`.
+
+    Returns:
+        A new list of (word, rect) pairs; the input rects are not mutated.
+    """
+    merged: list[tuple[str, Rect]] = []
+    for word, rect in word_elements:
+        if merged and word:
+            prev_word, prev_rect = merged[-1]
+            if prev_word and _should_join_words(prev_word, prev_rect, word, rect):
+                merged[-1] = (
+                    prev_word + word,
+                    Rect(
+                        min(prev_rect.left, rect.left),
+                        min(prev_rect.top, rect.top),
+                        max(prev_rect.right, rect.right),
+                        max(prev_rect.bottom, rect.bottom),
+                    ),
+                )
+                continue
+        merged.append((word, rect))
+    return merged
+
 if TYPE_CHECKING:
     from windows_mcp.desktop.service import Desktop
 
 class Tree:
+    # Class-level defaults keep get_nodes usable on instances built without __init__.
+    window_time_budget: Optional[float] = None
+    max_window_elements: Optional[int] = None
+
     def __init__(self,desktop:'Desktop'):
         self.desktop=weakref.proxy(desktop)
         self.screen_size=desktop.get_screen_size()
@@ -108,6 +299,8 @@ class Tree:
         self.screen_box=desktop.get_screen_box()
         self.tree_state=None
         self.element_budget=TreeElementBudget(resolve_max_tree_elements())
+        self.window_time_budget=resolve_window_time_budget()
+        self.max_window_elements=resolve_max_window_elements()
 
 
     def get_state(self,active_window_handle:int|None,other_windows_handles:list[int],use_dom:bool=False)->TreeState:
@@ -118,6 +311,10 @@ class Tree:
         # Fresh budget per capture — huge lists/grids (e.g. thousands of rows) must not
         # stall UI Automation or blow up the serialized response.
         self.element_budget = TreeElementBudget(resolve_max_tree_elements())
+        # Per-window scope (#383): one slow or enormous window must not use up the
+        # whole capture and leave every other window unvisited.
+        self.window_time_budget = resolve_window_time_budget()
+        self.max_window_elements = resolve_max_window_elements()
         start_time = perf_counter()
         profile_enabled = _snapshot_profile_enabled()
 
@@ -235,14 +432,21 @@ class Tree:
         Windows whose owning process is listed in ``WINDOWS_MCP_EXCLUDE_PROCESSES``
         are skipped before any UIA call, so their accessibility providers are never
         entered. Skipped windows are neither traversed nor reported as failures.
+        Windows owned by the process chain that launched this server (the MCP host,
+        e.g. VS Code) are skipped the same way unless ``WINDOWS_MCP_SKIP_HOST_PROCESSES``
+        is off: walking the host's own Electron renderer can hang it (#383).
         """
         interactive_nodes, scrollable_nodes, dom_informative_nodes = [], [], []
         failed_handles = []
         window_sem_nodes: list[SemanticNode] = []
 
         excluded_processes = _excluded_process_names()
+        host_pids = _host_process_ids() if _skip_host_processes_enabled() else frozenset()
         task_inputs = []
         for handle in windows_handles:
+            if host_pids and _window_process_id(handle) in host_pids:
+                logger.debug("[Tree] Skipping UIA traversal for MCP host window %s", handle)
+                continue
             if excluded_processes:
                 # Resolve the owning process before any UIA call: entering an
                 # excluded provider is the very thing this skip exists to avoid.
@@ -334,8 +538,12 @@ class Tree:
 
     def _append_word_nodes(self, word_elements:list[tuple[str,Rect]], reference_box:Rect, window_name:str,
                             target_nodes:list[TreeElementNode], current_semantic_node:'Optional[SemanticNode]'=None):
-        """Append one interactive `TreeElementNode` (control_type='Word') per (word, rect) pair."""
-        for word, rect in word_elements:
+        """Append one interactive `TreeElementNode` (control_type='Word') per (word, rect) pair.
+
+        Per-glyph runs of unspaced scripts (CJK/kana) are merged first, see
+        `_merge_unspaced_word_runs`.
+        """
+        for word, rect in _merge_unspaced_word_runs(word_elements):
             if not self.element_budget.try_consume():
                 break
             bounding_box = self.iou_bounding_box(reference_box, rect)
@@ -937,6 +1145,10 @@ class Tree:
     def get_nodes(self, handle: int, is_browser:bool=False, wait_time:float=0, use_dom:bool=False) -> tuple[list[TreeElementNode],list[ScrollElementNode],list[TextElementNode],Optional[SemanticNode]]:
         if wait_time > 0:
             sleep(wait_time)
+        # Opened after the retry back-off sleep so a retry gets the full window budget.
+        self.element_budget.begin_window(
+            max_elements=self.max_window_elements, max_seconds=self.window_time_budget
+        )
         try:
             node = ControlFromHandle(handle)
             if not node:
@@ -1073,6 +1285,23 @@ class Tree:
         except Exception as e:
             logger.error(f"Error getting nodes for handle {handle}: {e}")
             raise
+        finally:
+            cut_reason = self.element_budget.end_window()
+            if cut_reason == WINDOW_CUT_TIME:
+                logger.warning(
+                    "[Tree] Window %#x exceeded its %.1fs traversal budget; returning the "
+                    "elements captured so far. Set WINDOWS_MCP_WINDOW_TIME_BUDGET_SEC to "
+                    "change it.",
+                    handle,
+                    self.window_time_budget,
+                )
+            elif cut_reason is not None:
+                logger.warning(
+                    "[Tree] Window %#x reached its %d-element cap; returning the elements "
+                    "captured so far. Set WINDOWS_MCP_MAX_WINDOW_ELEMENTS to change it.",
+                    handle,
+                    self.max_window_elements,
+                )
 
     def on_focus_change(self, sender: Any):
         """Handle focus change events."""

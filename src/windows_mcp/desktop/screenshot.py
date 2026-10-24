@@ -207,7 +207,20 @@ class _DxcamBackend(_ScreenshotBackend):
         frame = camera.grab(region=region, copy=True, new_frame_only=False)
         if frame is None:
             raise RuntimeError("DXGI capture returned no frame")
-        return Image.fromarray(frame)
+        image = Image.fromarray(frame)
+        # dxcam addresses outputs per adapter, so a stale or mismatched output can hand
+        # back another monitor's pixels without raising (issue #416). A frame whose size
+        # differs from the requested rect is never the right picture; raise so the chain
+        # falls through to a backend that captures by desktop coordinates instead. Empty
+        # frames are left to _is_usable_capture, which retires the backend (issue #371).
+        expected_size = (capture_rect.width(), capture_rect.height())
+        if image.width > 0 and image.height > 0 and image.size != expected_size:
+            raise RuntimeError(
+                f"DXGI capture returned a {image.width}x{image.height} frame for a "
+                f"{expected_size[0]}x{expected_size[1]} region "
+                f"(device={device_idx}, output={output_idx})"
+            )
+        return image
 
 
 class _PillowBackend(_ScreenshotBackend):
@@ -341,15 +354,20 @@ def capture(
         chain = [cls]
 
     # Try each candidate: skip unavailable ones, catch failures and fall through.
+    # Any exception is caught -- the chain exists so that one backend misbehaving
+    # on unusual hardware degrades to a working one, and third-party backends
+    # (dxcam in particular) raise well outside the usual OSError family (#417).
+    failures: list[tuple[str, BaseException]] = []
     for backend_cls in chain:
         if backend_cls.name in _degraded_backends:
             continue
         inst = _get_backend(backend_cls.name)
-        if not inst.is_available(capture_rect):
-            continue
         try:
+            if not inst.is_available(capture_rect):
+                continue
             image = inst.capture(capture_rect)
-        except (OSError, RuntimeError, ValueError, IndexError, COMError):
+        except Exception as exc:
+            failures.append((inst.name, exc))
             logger.warning(
                 "Screenshot backend '%s' failed; trying next backend",
                 inst.name,
@@ -372,4 +390,9 @@ def capture(
         return image, inst.name
 
     # All candidates exhausted — pillow is always present as the last resort.
-    return _get_backend("pillow").capture(capture_rect), "pillow"
+    try:
+        return _get_backend("pillow").capture(capture_rect), "pillow"
+    except Exception as exc:
+        failures.append(("pillow", exc))
+        summary = "; ".join(f"{name}: {type(err).__name__}: {err}" for name, err in failures)
+        raise RuntimeError(f"All screenshot backends failed ({summary})") from exc

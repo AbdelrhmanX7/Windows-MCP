@@ -10,7 +10,10 @@ from typing import Any, Literal
 from mcp.types import ToolAnnotations
 from windows_mcp.desktop.utils import as_bool as _as_bool
 from windows_mcp.infrastructure import with_analytics
+from windows_mcp.resolver import ResolveError, Resolver
+from windows_mcp.resolver.scoring import EDIT_TYPES, split_path
 from fastmcp import Context
+from fastmcp.exceptions import ToolError
 
 
 WaitForCondition = Literal[
@@ -212,6 +215,46 @@ def _validate_wait_for_args(
     return normalized
 
 
+_FOREGROUND_SETTLE_SEC = 0.15
+
+
+def _resolve_target(
+    desktop: Any,
+    target: str,
+    action: Callable[[Any], None],
+    *,
+    control_type: str | None,
+    window: str | None,
+    nth: int | None,
+    prefer_types: frozenset[str] = frozenset(),
+) -> list[Any]:
+    """Resolve a target described in words and run ``action`` on each path step."""
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError("target must be a non-empty string")
+    if nth is not None and (isinstance(nth, bool) or not isinstance(nth, int) or nth < 1):
+        raise ValueError("nth must be an integer >= 1 (1 = first match in reading order)")
+
+    def bring_to_front(root: Any) -> None:
+        # A background window named by `window` may be covered; a center-point click
+        # would land on whatever is on top of it.
+        if window and not root.in_foreground:
+            desktop.bring_window_to_top(root.handle)
+            time.sleep(_FOREGROUND_SETTLE_SEC)
+
+    try:
+        return Resolver(desktop).act(
+            target,
+            action,
+            control_type=control_type,
+            window=window,
+            nth=nth,
+            prefer_types=prefer_types,
+            before_first_action=bring_to_front,
+        )
+    except ResolveError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 def register(
     mcp: Any,
     *,
@@ -221,10 +264,17 @@ def register(
     @mcp.tool(
         name="Click",
         description=(
-            "Performs mouse clicks at specified coordinates [x, y] or passing a UI element's label/id. "
+            "Performs mouse clicks at specified coordinates [x, y], on a UI element's label/id, "
+            "or on a target described in words. "
             "Supports button types: 'left' for selection/activation, 'right' for context menus, 'middle'. "
             "Supports clicks: 0=hover only (no click), 1=single click (select/focus), 2=double click (open/activate). "
-            "Provide either loc or label."
+            "Provide exactly one of loc, label or target. "
+            "target names the element (e.g. 'Play', 'Save button', 'search box', 'Seven') and is "
+            "resolved in-process from the accessibility tree of the foreground window (or `window`) "
+            "in ~100 ms, so no Snapshot is needed first; 'File > Save As' clicks a menu chain. "
+            "Optional control_type (button, edit, menu, tab, link, checkbox, ...) and nth "
+            "(1-based, reading order) disambiguate. On a weak match nothing is clicked and the "
+            "top candidates are returned."
         ),
         annotations=ToolAnnotations(
             title="Click",
@@ -240,24 +290,108 @@ def register(
         label: int | None = None,
         button: Literal["left", "right", "middle"] = "left",
         clicks: int = 1,
+        target: str | None = None,
+        control_type: str | None = None,
+        window: str | None = None,
+        nth: int | None = None,
         ctx: Context = None,
     ) -> str:
         desktop = get_desktop()
         loc = _as_loc(loc)
+        num_clicks = {0: "Hover", 1: "Single", 2: "Double"}
+        if target is not None:
+            if loc is not None or label is not None:
+                raise ValueError("Provide exactly one of loc, label or target.")
+            results = _resolve_target(
+                desktop,
+                target,
+                lambda cand: desktop.click(loc=list(cand.center), button=button, clicks=clicks),
+                control_type=control_type,
+                window=window,
+                nth=nth,
+            )
+            x, y = results[-1].best.center
+            lines = [f"{num_clicks.get(clicks)} {button} clicked at ({x},{y})."]
+            lines.extend(result.summary() for result in results)
+            return "\n".join(lines)
         if loc is None and label is None:
-            raise ValueError("Either loc or label must be provided.")
+            raise ValueError("Either loc, label or target must be provided.")
         if label is not None:
             loc = _resolve_label(desktop, label)
         if len(loc) != 2:
             raise ValueError("Location must be a list of exactly 2 integers [x, y]")
         x, y = loc[0], loc[1]
         desktop.click(loc=loc, button=button, clicks=clicks)
-        num_clicks = {0: "Hover", 1: "Single", 2: "Double"}
         return f"{num_clicks.get(clicks)} {button} clicked at ({x},{y})."
 
     @mcp.tool(
+        name="Locate",
+        description=(
+            "Read-only: finds the UI element a target described in words refers to "
+            "(e.g. 'Save button', 'search box', 'Seven') in the foreground window (or `window`) "
+            "and returns the best match with its confidence plus the top candidates "
+            "(name, type, loc [x, y], score), without clicking. Uses the same resolver as "
+            "Click(target=...). Optional control_type and nth (1-based, reading order). For a "
+            "path like 'File > Save As' only the first step can be located, since later steps "
+            "appear only after clicking."
+        ),
+        annotations=ToolAnnotations(
+            title="Locate",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+    @with_analytics(get_analytics(), "Locate-Tool", run_sync_in_thread=False)
+    def locate_tool(
+        target: str,
+        control_type: str | None = None,
+        window: str | None = None,
+        nth: int | None = None,
+        limit: int = 3,
+        ctx: Context = None,
+    ) -> str:
+        desktop = get_desktop()
+        if not isinstance(target, str) or not target.strip():
+            raise ValueError("target must be a non-empty string")
+        if nth is not None and (isinstance(nth, bool) or not isinstance(nth, int) or nth < 1):
+            raise ValueError("nth must be an integer >= 1 (1 = first match in reading order)")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+            raise ValueError("limit must be an integer between 1 and 20")
+        steps = split_path(target)
+        if not steps:
+            raise ValueError("target must not be empty")
+        try:
+            result = Resolver(desktop).resolve(
+                steps[0], control_type=control_type, window=window, nth=nth
+            )
+        except ResolveError as exc:
+            raise ToolError(str(exc)) from exc
+        lines = []
+        if result.ok:
+            x, y = result.best.center
+            lines.append(f"{result.summary()}; would click ({x},{y}).")
+        else:
+            lines.append(result.refusal().replace("Not clicked:", "Not resolved:", 1))
+        if result.note and result.ok:
+            lines.append(f"Note: {result.note}")
+        if len(steps) > 1:
+            lines.append(
+                f"Path has {len(steps)} steps; only the first was located. "
+                "Later steps appear after clicking: use Click(target=...) with the full path."
+            )
+        if result.ok:
+            lines.append("Top candidates:")
+            lines.append(result.candidates_text(limit))
+        elif limit > 3:
+            lines.append("More candidates:")
+            lines.append(result.candidates_text(limit))
+        return "\n".join(lines)
+
+    @mcp.tool(
         name="Type",
-        description="Types text at specified coordinates [x, y] or passing a UI element's label/id. Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing. Set caret_position to 'start' (beginning), 'end' (end), or 'idle' (default). Provide either loc or label. clear and press_enter accept only true or false. An empty text types nothing, so combine it with clear=True to just empty a field.",
+        description="Types text at specified coordinates [x, y] or passing a UI element's label/id. Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing. Set caret_position to 'start' (beginning), 'end' (end), or 'idle' (default). Provide exactly one of loc, label or target; target names the field in words (e.g. 'search box', 'File name') and is resolved like Click(target=...), preferring edit fields, with optional control_type, window and nth. clear and press_enter accept only true or false. An empty text types nothing, so combine it with clear=True to just empty a field.",
         annotations=ToolAnnotations(
             title="Type",
             readOnlyHint=False,
@@ -274,14 +408,50 @@ def register(
         clear: bool | str = False,
         caret_position: Literal["start", "idle", "end"] = "idle",
         press_enter: bool | str = False,
+        target: str | None = None,
+        control_type: str | None = None,
+        window: str | None = None,
+        nth: int | None = None,
         ctx: Context = None,
     ) -> str:
         desktop = get_desktop()
         loc = _as_loc(loc)
         clear = _as_bool(clear, "clear")
         press_enter = _as_bool(press_enter, "press_enter")
+        if target is not None:
+            if loc is not None or label is not None:
+                raise ValueError("Provide exactly one of loc, label or target.")
+            remaining = [len(split_path(target)) if isinstance(target, str) else 0]
+
+            def act(cand: Any) -> None:
+                # Earlier path steps ("Find > Search box") are clicked; the last one typed in.
+                remaining[0] -= 1
+                if remaining[0] > 0:
+                    desktop.click(loc=list(cand.center), button="left", clicks=1)
+                    return
+                desktop.type(
+                    loc=list(cand.center),
+                    text=text,
+                    caret_position=caret_position,
+                    clear=clear,
+                    press_enter=press_enter,
+                )
+
+            results = _resolve_target(
+                desktop,
+                target,
+                act,
+                control_type=control_type,
+                window=window,
+                nth=nth,
+                prefer_types=EDIT_TYPES,
+            )
+            x, y = results[-1].best.center
+            lines = [f"Typed {text} at ({x},{y})."]
+            lines.extend(result.summary() for result in results)
+            return "\n".join(lines)
         if loc is None and label is None:
-            raise ValueError("Either loc or label must be provided.")
+            raise ValueError("Either loc, label or target must be provided.")
         if label is not None:
             loc = _resolve_label(desktop, label)
         if len(loc) != 2:

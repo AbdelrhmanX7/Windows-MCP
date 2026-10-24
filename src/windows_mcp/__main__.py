@@ -187,10 +187,10 @@ def _watchdog_enabled() -> bool:
     consumer is ``Tree.on_focus_change``, which debounces the event and writes
     a debug log line -- the structure-change handling that once maintained
     ``tree_state.interactive_nodes`` was removed, and nothing reads the focus
-    state it tracks. Against that, running it costs a dedicated STA thread, a
-    long-lived UIA event subscription, and exposure to a native access
-    violation in the event pump that takes the whole server down with no
-    Python traceback (#332). The accessibility tree is built on demand for
+    state it tracks. Against that, running it costs a dedicated STA thread
+    polling ``GetFocusedElement()``. (Focus used to be a UIA event
+    subscription, which exposed the server to a native access violation in
+    the event pump with no Python traceback; see #332.) The accessibility tree is built on demand for
     every tool call regardless, so leaving it off changes no tool behaviour.
 
     Returns:

@@ -731,6 +731,20 @@ A window is excluded *before* any UI Automation call is made against it, so its 
 
 This is an exclusion mechanism — a mitigation, not a complete fix for every form of [#383](https://github.com/CursorTouch/Windows-MCP/issues/383). It only skips the processes you name; a pathological window you have not listed can still stall a capture.
 
+### MCP host windows and per-window budgets
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_SKIP_HOST_PROCESSES` | `on` | Skip windows owned by the processes that launched Windows-MCP (the MCP host, such as VS Code, Cursor or Claude Desktop). Set to `0`, `false`, `no` or `off` to traverse them. |
+| `WINDOWS_MCP_WINDOW_TIME_BUDGET_SEC` | `10` | Seconds a single window's tree walk may take. When it runs out, Windows-MCP keeps the elements found so far in that window and moves on to the next one. `0` disables the budget. Invalid or negative values use the default. |
+| `WINDOWS_MCP_MAX_WINDOW_ELEMENTS` | _(no cap)_ | Most elements a single window may contribute, so one huge window cannot use the whole `WINDOWS_MCP_MAX_TREE_ELEMENTS` budget. Unset, `0` or invalid means no per-window cap. |
+
+By default, Windows-MCP does not walk the accessibility tree of the application that launched it. Walking an Electron host's own renderer from inside it can hang the host (seen with VS Code, #383), and Windows then closes it along with every session inside. To find the host, Windows-MCP follows its parent processes up to the first one that owns a visible window, which is the host. Whatever launched the host, such as a browser that opened a `vscode://` link, is still captured. The walk never goes past `explorer.exe` or a system process, so the taskbar, the desktop and File Explorer are always captured. The skipped process names are logged once at startup. Host windows are left out of the tree, but they still appear in the window list. They are not reported as failed captures.
+
+The per-window budgets limit how much time and how many elements one slow or very large window can use. A window that hits its budget returns a partial tree, and every other window is still captured. A window cut short this way is logged as a warning. It does not add the truncation note that `WINDOWS_MCP_MAX_TREE_ELEMENTS` adds.
+
+If your MCP client runs inside Electron and you want to automate its windows too, launch it with Chromium's `--disable-renderer-accessibility` flag (e.g. `code --disable-renderer-accessibility`). The client then stops answering deep UI Automation queries into its web content, which avoids the hang, at the cost of screen-reader support in that app.
+
 ### UI Automation timeouts
 
 | Variable | Default | Description |
@@ -771,6 +785,17 @@ sampling filters transient readings but cannot distinguish persistent query fail
 | `WINDOWS_MCP_STATELESS_HTTP` | `false` | Set to `1`, `true`, `yes`, or `on` to run `streamable-http` without `Mcp-Session-Id` connection state. Useful for reconnects after restarts and for horizontally scaled deployments. |
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/cursortouch-windows-mcp-badge.png)](https://mseep.ai/app/cursortouch-windows-mcp)
+
+### Click target resolver
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_RESOLVER_MIN_CONFIDENCE` | `0.7` | `Click`/`Type` with `target=` act only at or above this confidence (`0`–`1`). Below it they click nothing and return the top candidates instead. |
+| `WINDOWS_MCP_RESOLVER_VISION` | _(off)_ | Set to `anthropic` (or `on`) to enable the tier-2 vision fallback. Off by default. |
+| `WINDOWS_MCP_RESOLVER_MODEL` | `claude-haiku-5-5` | Vision model used by tier 2. The key comes from `ANTHROPIC_API_KEY`. |
+| `WINDOWS_MCP_RESOLVER_VISION_TIMEOUT` | `3.0` | Seconds allowed for one tier-2 request. On timeout, HTTP error or a "none" answer the resolver falls back to the tier-1 result and does not click. |
+
+**Privacy note:** tier 1 (accessibility) never leaves the machine. Tier 2 is the only part of the resolver that sends data off the machine: when `WINDOWS_MCP_RESOLVER_VISION` is set *and* accessibility matching is weak (or the window exposes almost no elements), it sends a downscaled JPEG of **the target window only**, with numbered boxes drawn on it, plus the target text, to the configured provider (`api.anthropic.com`). Having `ANTHROPIC_API_KEY` in the environment does not enable it. Leave the variable unset if window contents must not leave the machine.
 
 ### Telemetry
 
@@ -831,8 +856,9 @@ Remote (with auth + IP allowlist + TLS):
 
 MCP Client can access the following tools to interact with Windows:
 
-- `Click`: Click on the screen at the given coordinates.
-- `Type`: Type text on an element (optionally clears existing text).
+- `Click`: Click on the screen at the given coordinates, on a Snapshot label, or on a `target` described in words (`Click(target="Save button")`, `Click(target="Seven")`, `Click(target="File > Save As")`). A target is resolved inside the server from the accessibility tree of the foreground window (or `window="Spotify"`), in ~10–40 ms on simple windows and up to ~200 ms on large dialogs (measured on a Win10 VM), so no Snapshot round trip is needed. Optional `control_type` (`button`, `edit`, `menu`, `tab`, `link`, `checkbox`, ...) and `nth` (1-based, reading order) disambiguate. Words like "button", "box"/"field", "tab", "link", "checkbox" and "menu" in the target act as control-type hints. If the best match is below `WINDOWS_MCP_RESOLVER_MIN_CONFIDENCE`, nothing is clicked and the tool returns an error listing the top 3 candidates (name, type, location, score). The result names what was resolved, e.g. `resolved: "Seven" (button) via uia in 23 ms, confidence 1.00`.
+- `Locate`: Read-only counterpart of `Click(target=...)`: returns the best match and top candidates without clicking. For a path only the first step can be located.
+- `Type`: Type text on an element (optionally clears existing text). Accepts `target` (e.g. `Type(target="search box", text="cats")`) to find the field by name, preferring edit fields.
 - `Scroll`: Scroll vertically or horizontally on the window or specific regions.
 - `Move`: Move mouse pointer or drag (set drag=True) to coordinates. For deterministic
   drag, set `from_loc=[x, y]` with `drag=True` to press at an explicit start point and
@@ -844,8 +870,8 @@ MCP Client can access the following tools to interact with Windows:
 - `ControlStatus`: Read the desktop control owner and remaining user-idle wait. It stays available when user takeover blocks new tool calls. During AI control, a visible edge and cursor glow indicate ownership; moving the physical mouse substantially or pressing `Ctrl+Alt+Shift+Backspace` returns control to the user until 10 seconds of inactivity. During screenshot capture, the indicator is temporarily hidden and physical input is released; any physical input during this interval preempts AI control, although `ControlStatus` can briefly still report `ai` until that event is processed. Stepwise desktop input stops at its next checkpoint, but an already-running external command (for example `PowerShell` or an `App` launch) may continue after takeover; this control gate does not cancel processes or undo completed side effects. On a detected hook fault, injected keys and mouse buttons are released asynchronously, so physical input can briefly overlap a still-held AI key or button. Windows may also silently remove a low-level hook without notifying this process; periodic hook replacement reduces but does not eliminate that undetected window. User takeover is therefore best-effort, not a security boundary or a guarantee of exclusive control.
   Sessionless MCP 2026-07-28 clients cannot receive unsolicited control-state logs; they should query `ControlStatus` when they need the current owner.
 - `DisplayInventory`: Read display layout, work areas, effective DPI, and scale metadata.
-- `Screenshot`: Fast screenshot-first desktop capture with cursor position, active/open windows, and an image. Skips UI tree extraction for speed and should be the default first call when you mainly need visual context. Supports `display=[0]` or `display=[0,1]` using zero-based active Windows display indices, and `region=[left, top, right, bottom]` (virtual-desktop pixel coordinates) to capture just that rectangle instead of the whole screen — cheaper on tokens when you already know which area matters. `region` takes precedence over `display` when both are given; an invalid or out-of-bounds region raises an error. After capture, a brief orange-red glowing border is drawn inside the captured area as a visual confirmation (set `WINDOWS_MCP_DISABLE_FLASH=1` to disable).
-- `Snapshot`: Full desktop state capture for workflows that need interactive element ids, scrollable regions, or `use_dom=True` browser extraction. Supports `use_vision=True` for including screenshots, `display=[0]` or `display=[0,1]` using zero-based active Windows display indices, and `region=[left, top, right, bottom]` (virtual-desktop pixel coordinates) to inspect just that rectangle instead of the whole screen; `region` takes precedence over `display` when both are given, and an invalid or out-of-bounds region raises an error.
+- `Screenshot`: Fast screenshot-first desktop capture with cursor position, active/open windows, and an image. Skips UI tree extraction for speed and should be the default first call when you mainly need visual context. Supports `display=[0]` or `display=[0,1]` using zero-based active Windows display indices, and `region=[left, top, right, bottom]` (virtual-desktop pixel coordinates) to capture just that rectangle instead of the whole screen — cheaper on tokens when you already know which area matters. `region` takes precedence over `display` when both are given; an invalid or out-of-bounds region raises an error. `save_path` (absolute file path ending in `.png`, `.jpg`/`.jpeg`, `.bmp` or `.webp`, or an absolute directory, which gets a timestamped `screenshot-*.png`) also writes the returned image to disk and reports the absolute path as `Screenshot Saved To:` in the text result; the image is still returned inline. After capture, a brief orange-red glowing border is drawn inside the captured area as a visual confirmation (set `WINDOWS_MCP_DISABLE_FLASH=1` to disable).
+- `Snapshot`: Full desktop state capture for workflows that need interactive element ids, scrollable regions, or `use_dom=True` browser extraction. Supports `use_vision=True` for including screenshots, `display=[0]` or `display=[0,1]` using zero-based active Windows display indices, and `region=[left, top, right, bottom]` (virtual-desktop pixel coordinates) to inspect just that rectangle instead of the whole screen; `region` takes precedence over `display` when both are given, and an invalid or out-of-bounds region raises an error. `save_path` works as for `Screenshot` and requires `use_vision=True`.
 - `App`: Launch an application by Start Menu name or strictly by executable path with separated argv and optional cwd; resize, move, and switch between windows.
 - `PowerShell`: To execute PowerShell commands.
 - `FileSystem`: Read, write, copy, move, delete, list, search, and inspect files and directories.
@@ -854,7 +880,7 @@ MCP Client can access the following tools to interact with Windows:
 - `MultiEdit`: Enter text into multiple input fields at specified coordinates. Uses bulk label-to-coordinate resolution when labels are provided.
 - `Clipboard`: Read or set Windows clipboard content.
 - `Process`: List running processes or terminate them by PID or name.
-- `Notification`: Send a Windows toast notification with a title and message.
+- `Notification`: Send a Windows toast notification with a title and message. Optional `app_id` (a registered AppUserModelID, e.g. `Microsoft.Windows.Explorer`) picks the app it appears under; it defaults to Windows PowerShell.
 - `Registry`: Read, write, delete, or list Windows Registry values and keys.
 
 

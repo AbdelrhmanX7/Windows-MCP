@@ -33,6 +33,7 @@ from windows_mcp.tools.control_policy import CLASSIFIED_TOOLS, MODES, requires_c
             "Wait",
             "WaitFor",
             "DisplayInventory",
+            "Locate",
         )
     ]
     + [

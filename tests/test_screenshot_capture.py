@@ -202,13 +202,13 @@ class TestDxcamBackend:
         monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
         monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
 
-        fake_image = Image.new("RGB", (100, 100), "red")
+        fake_image = Image.new("RGB", (1920, 1080), "red")
         with patch.object(Image, "fromarray", return_value=fake_image):
             backend = _DxcamBackend()
             result = backend.capture(MONITOR_1)
 
         assert isinstance(result, Image.Image)
-        assert result.size == (100, 100)
+        assert result.size == (1920, 1080)
         assert result.getbbox() is not None
         fake_dxcam.create.assert_called_once_with(
             device_idx=0,
@@ -224,12 +224,12 @@ class TestDxcamBackend:
         monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
         monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
 
-        fake_image = Image.new("RGB", (100, 100), "red")
+        fake_image = Image.new("RGB", (500, 400), "red")
         with patch.object(Image, "fromarray", return_value=fake_image):
             backend = _DxcamBackend()
             result = backend.capture(Rect(2000, 100, 2500, 500))
 
-        assert result.size == (100, 100)
+        assert result.size == (500, 400)
         fake_camera.grab.assert_called_once_with(
             region=(80, 100, 580, 500),
             copy=True,
@@ -247,6 +247,59 @@ class TestDxcamBackend:
         backend = _DxcamBackend()
         with pytest.raises(RuntimeError, match="no frame"):
             backend.capture(MONITOR_1)
+
+    def test_hybrid_gpu_selects_second_adapter_by_geometry(self, monkeypatch):
+        """Issue #416: each GPU owns one monitor, so both are output 0 on different devices."""
+        laptop = Rect(0, 0, 2560, 1600)
+        external = Rect(2560, 67, 4480, 1147)
+        hybrid_outputs = [
+            DxcamOutput(device_idx=0, output_idx=0, rect=laptop),
+            DxcamOutput(device_idx=1, output_idx=0, rect=external),
+        ]
+        fake_camera = MagicMock()
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value = fake_camera
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: hybrid_outputs))
+
+        assert _DxcamBackend._resolve_region(external) == (1, 0, None)
+        assert _DxcamBackend._resolve_region(laptop) == (0, 0, None)
+
+        with patch.object(Image, "fromarray", return_value=Image.new("RGB", (1920, 1080))):
+            result = _DxcamBackend().capture(external)
+
+        assert result.size == (1920, 1080)
+        fake_dxcam.create.assert_called_once_with(
+            device_idx=1,
+            output_idx=0,
+            processor_backend="numpy",
+        )
+
+    def test_capture_rejects_frame_from_another_monitor(self, monkeypatch):
+        """Issue #416: a frame sized like a different monitor must not be returned."""
+        fake_camera = MagicMock()
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value = fake_camera
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+
+        wrong_monitor = Image.new("RGB", (2560, 1600), "red")
+        with patch.object(Image, "fromarray", return_value=wrong_monitor):
+            with pytest.raises(RuntimeError, match="2560x1600 frame for a 1920x1080 region"):
+                _DxcamBackend().capture(MONITOR_1)
+
+    def test_capture_leaves_empty_frame_to_usability_check(self, monkeypatch):
+        """Issue #371: an empty frame is returned so capture() can retire dxcam."""
+        fake_camera = MagicMock()
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value = fake_camera
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+
+        with patch.object(Image, "fromarray", return_value=Image.new("RGB", (0, 0))):
+            result = _DxcamBackend().capture(MONITOR_1)
+
+        assert result.size == (0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +580,87 @@ class TestCapture:
 
         assert backend_name == "pillow"
         assert image.size == (1920, 1080)
+
+    def test_auto_falls_back_when_dxcam_returns_wrong_monitor(self, monkeypatch):
+        """Issue #416: a wrong-sized dxcam frame falls through instead of being returned."""
+        fake_camera = MagicMock()
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value = fake_camera
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(screenshot, "mss", None)
+        monkeypatch.setattr(screenshot, "_degraded_backends", set())
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+
+        fake_img = Image.new("RGB", (1920, 1080), "blue")
+        monkeypatch.setattr(
+            screenshot, "ImageGrab", MagicMock(grab=MagicMock(return_value=fake_img))
+        )
+
+        with patch.object(Image, "fromarray", return_value=Image.new("RGB", (2560, 1600))):
+            image, backend_name = capture(MONITOR_1, backend="auto")
+
+        assert backend_name == "pillow"
+        assert image is fake_img
+        # A size mismatch can be transient (e.g. mid display change); do not retire dxcam.
+        assert "dxcam" not in screenshot._degraded_backends
+
+    def test_unexpected_exception_type_still_falls_back(self, monkeypatch):
+        """Backends raising outside the OSError family must not abort the chain (#417)."""
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value.grab.side_effect = AttributeError("camera released")
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(screenshot, "mss", None)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+
+        fake_img = Image.new("RGB", (1920, 1080), "blue")
+        monkeypatch.setattr(
+            screenshot, "ImageGrab", MagicMock(grab=MagicMock(return_value=fake_img))
+        )
+
+        image, backend_name = capture(MONITOR_1, backend="auto")
+
+        assert backend_name == "pillow"
+        assert image.size == (1920, 1080)
+
+    def test_is_available_raising_falls_back(self, monkeypatch):
+        """A backend whose availability probe raises is skipped, not fatal (#417)."""
+        monkeypatch.setattr(screenshot, "dxcam", MagicMock())
+        monkeypatch.setattr(screenshot, "mss", None)
+
+        def _boom():
+            raise IndexError("list index out of range")
+
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(_boom))
+
+        fake_img = Image.new("RGB", (1920, 1080), "blue")
+        monkeypatch.setattr(
+            screenshot, "ImageGrab", MagicMock(grab=MagicMock(return_value=fake_img))
+        )
+
+        image, backend_name = capture(MONITOR_0, backend="auto")
+
+        assert backend_name == "pillow"
+        assert image.size == (1920, 1080)
+
+    def test_all_backends_failing_reports_each_cause(self, monkeypatch):
+        """When every backend fails, the error names each backend and its cause."""
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.side_effect = IndexError("list index out of range")
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(screenshot, "mss", None)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+        monkeypatch.setattr(
+            screenshot,
+            "ImageGrab",
+            MagicMock(grab=MagicMock(side_effect=OSError("screen grab failed"))),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            capture(MONITOR_1, backend="auto")
+
+        message = str(excinfo.value)
+        assert "dxcam: IndexError: list index out of range" in message
+        assert "pillow: OSError: screen grab failed" in message
 
     def test_capture_returns_non_empty_image(self, monkeypatch):
         """Verify the returned image has actual pixel content (not all-zero)."""

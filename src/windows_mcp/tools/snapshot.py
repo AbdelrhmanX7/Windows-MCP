@@ -24,7 +24,7 @@ def register(mcp, *, get_desktop, get_analytics):
     global state_tool, screenshot_tool
     @mcp.tool(
         name='Snapshot',
-        description="Take a screenshot and inspect the screen. Keywords: screenshot, screen capture, see screen, observe, look, inspect, UI elements, what's on screen. Captures complete desktop state including: system language, focused/opened windows, interactive elements (buttons, text fields, links, menus with coordinates), and scrollable areas. Set use_vision=True to include screenshot with cursor highlight. Set use_annotation=False to get a clean screenshot without bounding box overlays on UI elements (default: True, draws colored rectangles around detected elements). Set use_ui_tree=False for a faster screenshot-only snapshot when you do not need interactive or scrollable element extraction. Set width_reference_lines/height_reference_lines to overlay a grid for better spatial reasoning (make sure vision is enabled to use it). Set use_dom=True for browser content to get web page elements instead of browser UI. Set display=[0] or display=[0,1] using zero-based active Windows display indices; omit it to keep the default full-desktop behavior. Set region=[left, top, right, bottom] in virtual-desktop pixel coordinates to capture and inspect only that rectangle instead of the whole screen/display — useful when you already know which area matters and want to save tokens; region takes precedence over display when both are given, and an invalid or out-of-bounds region raises an error rather than silently capturing something else. Always call this first to understand the current desktop state before taking actions.",
+        description="Take a screenshot and inspect the screen. Keywords: screenshot, screen capture, see screen, observe, look, inspect, UI elements, what's on screen. Captures complete desktop state including: system language, focused/opened windows, interactive elements (buttons, text fields, links, menus with coordinates), and scrollable areas. Set use_vision=True to include screenshot with cursor highlight. Set use_annotation=False to get a clean screenshot without bounding box overlays on UI elements (default: True, draws colored rectangles around detected elements). Set use_ui_tree=False for a faster screenshot-only snapshot when you do not need interactive or scrollable element extraction. Set width_reference_lines/height_reference_lines to overlay a grid for better spatial reasoning (make sure vision is enabled to use it). Set use_dom=True for browser content to get web page elements instead of browser UI. Set display=[0] or display=[0,1] using zero-based active Windows display indices; omit it to keep the default full-desktop behavior. Set region=[left, top, right, bottom] in virtual-desktop pixel coordinates to capture and inspect only that rectangle instead of the whole screen/display — useful when you already know which area matters and want to save tokens; region takes precedence over display when both are given, and an invalid or out-of-bounds region raises an error rather than silently capturing something else. Set save_path to an absolute file path (.png, .jpg/.jpeg, .bmp, .webp) or an absolute directory (a timestamped screenshot-*.png is created inside it; missing folders are created) to also write the screenshot to disk, e.g. for OCR, QR/barcode decoding, attaching, or diffing; requires use_vision=True. The saved file holds exactly the returned image (same annotations, same downscaling; pass use_annotation=False for clean pixels, e.g. for QR/OCR), and its absolute path is reported as 'Screenshot Saved To:' in the text result. Always call this first to understand the current desktop state before taking actions.",
         annotations=ToolAnnotations(
             title="Snapshot",
             readOnlyHint=True,
@@ -43,6 +43,7 @@ def register(mcp, *, get_desktop, get_analytics):
         height_reference_line: int | None = None,
         display: list[int] | None = None,
         region: list[int] | str | None = None,
+        save_path: str | None = None,
         ctx: Context = None,
     ):
         try:
@@ -57,6 +58,7 @@ def register(mcp, *, get_desktop, get_analytics):
                 display=display,
                 region=_as_region(region),
                 tool_name="Snapshot tool",
+                save_path=save_path,
             )
         except Exception as e:
             logger.warning(
@@ -73,7 +75,7 @@ def register(mcp, *, get_desktop, get_analytics):
 
     @mcp.tool(
         name='Screenshot',
-        description="Captures a fast screenshot-first desktop snapshot with cursor position, desktop/window summaries, and an image. This path skips UI tree extraction for speed. Use Snapshot when you need interactive element ids, scrollable regions, or browser DOM extraction. Set display=[0] or display=[0,1] using zero-based active Windows display indices to capture only those monitors. Set region=[left, top, right, bottom] in virtual-desktop pixel coordinates to capture only that rectangle instead of the whole screen/display — useful when you already know which area matters and want to save tokens; region takes precedence over display when both are given, and an invalid or out-of-bounds region raises an error rather than silently capturing something else. Note: the returned image may be downscaled for efficiency; when it is, multiply image coordinates by the ratio of original size to displayed size to get the actual screen coordinates for mouse actions (Click, Move, etc.).",
+        description="Captures a fast screenshot-first desktop snapshot with cursor position, desktop/window summaries, and an image. This path skips UI tree extraction for speed. Use Snapshot when you need interactive element ids, scrollable regions, or browser DOM extraction. Set display=[0] or display=[0,1] using zero-based active Windows display indices to capture only those monitors. Set region=[left, top, right, bottom] in virtual-desktop pixel coordinates to capture only that rectangle instead of the whole screen/display — useful when you already know which area matters and want to save tokens; region takes precedence over display when both are given, and an invalid or out-of-bounds region raises an error rather than silently capturing something else. Set save_path to an absolute file path (.png, .jpg/.jpeg, .bmp, .webp) or an absolute directory (a timestamped screenshot-*.png is created inside it; missing folders are created) to also write the screenshot to disk, e.g. for OCR, QR/barcode decoding, attaching, or diffing. The saved file holds exactly the returned image (same pixels and downscaling, so coordinates line up), and its absolute path is reported as 'Screenshot Saved To:' in the text result. Note: the returned image may be downscaled for efficiency; when it is, multiply image coordinates by the ratio of original size to displayed size to get the actual screen coordinates for mouse actions (Click, Move, etc.).",
         annotations=ToolAnnotations(
             title="Screenshot",
             readOnlyHint=True,
@@ -89,6 +91,7 @@ def register(mcp, *, get_desktop, get_analytics):
         height_reference_line: int | None = None,
         display: list[int] | None = None,
         region: list[int] | str | None = None,
+        save_path: str | None = None,
         ctx: Context = None,
     ):
         try:
@@ -103,6 +106,7 @@ def register(mcp, *, get_desktop, get_analytics):
                 display=display,
                 region=_as_region(region),
                 tool_name="Screenshot tool",
+                save_path=save_path,
             )
         except Exception as e:
             logger.warning(

@@ -411,7 +411,7 @@ def test_recovery_requires_ledger_clear_health_and_interactive_desktop(monkeypat
     assert owner.status()["state"] == "unavailable"
     monkeypatch.setattr(control, "_interactive_desktop", lambda: True)
     owner._recover_after_rehook()
-    assert owner.status()["state"] == "user"
+    assert owner.status()["state"] == "ready"
     assert owner.input_ledger.pending() == ()
 
 

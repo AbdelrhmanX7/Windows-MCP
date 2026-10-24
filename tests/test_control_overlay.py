@@ -76,6 +76,35 @@ def test_indicator_lifecycle_and_no_restore_after_takeover(monkeypatch):
     assert events.count("close") == 2
 
 
+def test_render_failure_degrades_to_no_indicator_and_logs_once(monkeypatch, caplog):
+    """A blocked renderer (e.g. Smart App Control on _imagingft) keeps control usable (#478)."""
+    builds = []
+
+    def failing_build(rects, pending):
+        builds.append(pending)
+        raise ImportError("DLL load failed while importing _imagingft")
+
+    monkeypatch.setattr(control_overlay, "_monitor_rects", lambda: ((0, 0, 800, 600),))
+    monkeypatch.setattr(control_overlay, "_build_layers", failing_build)
+    monkeypatch.setattr(control_overlay, "_render_failures_logged", set())
+    monkeypatch.setattr(flash_overlay, "_pump_messages", lambda hwnd: None)
+    control_overlay.start()
+    with caplog.at_level("WARNING", logger=control_overlay.logger.name):
+        assert control_overlay.set_active(True, generation=1) is True
+        assert control_overlay.is_healthy() is True
+        assert control_overlay.set_pending(True, generation=2) is True
+        assert control_overlay.set_active(False, generation=3) is True
+        assert control_overlay.set_active(True, generation=4) is True
+        with control_overlay.suspend_for_capture():
+            pass
+        time.sleep(0.2)
+        assert control_overlay.is_healthy() is True
+    assert len(builds) >= 2  # Retried on a new mode and a new activation.
+    failures = [r for r in caplog.records if "could not be rendered" in r.getMessage()]
+    assert len(failures) == 1
+    assert control_overlay._instance.error is None
+
+
 def test_failed_indicator_reports_unhealthy(monkeypatch):
     class FailedIndicator:
         thread = threading.current_thread()

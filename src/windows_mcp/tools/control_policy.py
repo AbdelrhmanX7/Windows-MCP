@@ -19,6 +19,7 @@ OTHER = frozenset(
         "Wait",
         "WaitFor",
         "DisplayInventory",
+        "Locate",
     }
 )
 MODES = {
