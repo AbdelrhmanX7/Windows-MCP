@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 21 tools via FastMCP:
+Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 22 tools via FastMCP:
 
 | Group | Tools |
 |---|---|
 | Capture | `Screenshot`, `Snapshot`, `Scrape`, `DisplayInventory` |
-| Input | `Click`, `Type`, `Scroll`, `Move` (also drag-and-drop via `drag=True`), `Shortcut`, `MultiSelect`, `MultiEdit` |
+| Input | `Click` (also `target=` in words), `Locate`, `Type`, `Scroll`, `Move` (also drag-and-drop via `drag=True`), `Shortcut`, `MultiSelect`, `MultiEdit` |
 | Timing | `Wait`, `WaitFor` |
 | System | `App`, `PowerShell`, `FileSystem`, `Registry`, `Process`, `Clipboard`, `Notification`, `ControlStatus` |
 
@@ -42,6 +42,8 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 **Tree service** — `tree/service.py`: Captures the Windows accessibility tree from active and background windows. Identifies interactive elements and scrollable areas. Uses `ThreadPoolExecutor` for multi-threaded UI traversal. `tree/views.py` defines `TreeElementNode`, `ScrollElementNode`, `TreeState`. `tree/config.py` has control type configurations.
 
 **UIAutomation wrapper** — `uia/`: Low-level abstraction over the Windows UIAutomation COM API via `comtypes`. `core.py` wraps the main automation object, `controls.py` has control-specific logic, `patterns.py` wraps UIAutomation patterns, `enums.py` has COM enumerations, `events.py` handles event subscriptions.
+
+**Resolver** — `resolver/`: Turns a target described in words (`Click(target="Save button")`, `"File > Save As"`) into an element inside the server, so the planner needs no Snapshot round trip. `uia_source.py` reads the foreground (or named) window plus its open menus/owned popups with one cached `FindAllBuildCache` per window (raw COM element, `Cached*` properties only); `scoring.py` is pure ranking (exact > prefix > word > fuzzy over Name/LegacyIAccessible name/AutomationId/HelpText, control-type hints parsed from the text, ambiguity penalty, 1-based `nth` in reading order); `vision.py` is the opt-in tier 2 (Set-of-Mark JPEG of the window to a vision model, Anthropic via `requests`); `service.py` ties them together, applies the confidence threshold and runs `A > B` chains. Below the threshold nothing is clicked and the top 3 candidates are returned. Used by `Click`/`Type` (`target=`) and the read-only `Locate` tool in `tools/input.py`.
 
 **WatchDog** — `watchdog/service.py`: Runs in a separate STA thread that polls the focused element (focus is not subscribed to; see #332) and can subscribe to structure/property UIAutomation events. Notifies the Tree service of focus changes so the accessibility tree stays current.
 
@@ -87,6 +89,10 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `POSTHOG_HOST` | `https://us.i.posthog.com` | Override the PostHog host for anonymous telemetry, such as for a self-hosted PostHog deployment. Checked in `infrastructure/analytics.py`. |
 | `WINDOWS_MCP_WATCHDOG` | _(off)_ | Set to `on`/`1`/`true`/`yes`/`enabled` to start the UIA focus WatchDog thread. Unset, or any other value, leaves it off. Opt-in because it only emits debug logging today; focus is polled rather than subscribed to, removing the native focus-callback path that crashed the server (#332). Resolved in `__main__.py`. |
 | `WINDOWS_MCP_DEBUG` | `false` | Set to `1`/`true`/`yes`/`on` to enable debug mode. Checked in `config.py`. Also available as `--debug` CLI flag. |
+| `WINDOWS_MCP_RESOLVER_MIN_CONFIDENCE` | `0.7` | `Click`/`Type` with `target=` act only at or above this confidence (0–1); below it they click nothing and return the top candidates. Resolved in `resolver/config.py`. |
+| `WINDOWS_MCP_RESOLVER_VISION` | _(off)_ | Set to `anthropic` (or `on`) to enable the tier-2 vision fallback, which sends a downscaled JPEG of the target window to the provider when accessibility matching is weak. An API key alone never enables it. Resolved in `resolver/config.py`. |
+| `WINDOWS_MCP_RESOLVER_MODEL` | `claude-haiku-5-5` | Vision model for tier 2. Key from `ANTHROPIC_API_KEY`. Resolved in `resolver/config.py`. |
+| `WINDOWS_MCP_RESOLVER_VISION_TIMEOUT` | `3.0` | Seconds allowed for the tier-2 request; on timeout or error the resolver degrades to tier-1 results. Resolved in `resolver/config.py`. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(off)_ | Set to `1`/`true`/`yes`/`on` to suppress the orange-red glowing border that briefly appears after every screenshot. Resolved in `desktop/flash_overlay.py`. |
 
 ## Security Context
