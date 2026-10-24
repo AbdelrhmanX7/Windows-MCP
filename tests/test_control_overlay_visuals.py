@@ -270,6 +270,33 @@ def test_notice_glow_stays_on_its_monitor_when_narrow(monkeypatch, width):
     assert glow[0] + glow[2] <= 100 + width
 
 
+def test_notice_text_failure_keeps_edges_and_cursor_ring(monkeypatch, caplog):
+    made = []
+
+    class FakeLayer:
+        def __init__(self, x, y, width, height, bgra, name, *, breathes=True):
+            made.append(name)
+
+        def close(self):
+            pass
+
+    def blocked_font(width):
+        raise ImportError("DLL load failed while importing _imagingft")
+
+    monkeypatch.setattr(control_overlay, "_Layer", FakeLayer)
+    monkeypatch.setattr(control_overlay, "_notice_bitmap", blocked_font)
+    monkeypatch.setattr(control_overlay, "_render_failures_logged", set())
+    monkeypatch.setattr(control_overlay._user32, "GetCursorPos", lambda ptr: True)
+    with caplog.at_level("WARNING", logger=control_overlay.logger.name):
+        for _ in range(2):
+            layers, ring = control_overlay._build_layers(((0, 0, 1920, 1080),), pending=False)
+    assert len(layers) == 4 and ring is not None
+    assert made[:5] == ["0_top", "0_bottom", "0_left", "0_right", "cursor"]
+    assert not any("notice" in name for name in made)
+    failures = [r for r in caplog.records if "could not be rendered" in r.getMessage()]
+    assert len(failures) == 1
+
+
 def test_layer_failure_closes_prior_windows(monkeypatch):
     closed = []
 
