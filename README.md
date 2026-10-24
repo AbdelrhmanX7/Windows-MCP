@@ -652,13 +652,17 @@ is still accepted for compatibility but no longer affects takeover.
 | Policy | Operations that require desktop ownership |
 |---|---|
 | `relaxed` (A, default) | Direct input: Click, Type, Scroll, Move, Shortcut, MultiSelect, MultiEdit; App `switch` and `resize`. |
-| `balanced` (B) | Everything in A, plus PowerShell, Notification, App `launch`/`launch_executable`, Process `kill`, and Clipboard `set`. |
+| `balanced` (B) | Everything in A, plus PowerShell, Notification, AppSkill, App `launch`/`launch_executable`, Process `kill`, and Clipboard `set`. |
 | `strict` (C) | All tools except ControlStatus, matching the previous gate behavior. |
 
-FileSystem, Registry, Snapshot, Screenshot, Scrape, Wait, WaitFor, DisplayInventory,
+FileSystem, Registry, Snapshot, Screenshot, Scrape, Wait, WaitFor, DisplayInventory, Apps,
 Process `list`, and Clipboard `get` bypass ownership in A and B. This classification
 concerns desktop interference, not permissions or data safety. PowerShell can still
 operate the UI, and file/registry operations can have other side effects.
+
+`Tasks` (local task state) is never gated, like `ControlStatus`. `RunParallel` is not gated
+itself; each of its inner calls passes the gate individually, and a whole batch is
+rejected up front during a user takeover when its strictest inner call needs ownership.
 
 Ungated calls do not acquire or extend the desktop lease, activate its indicator,
 or wait for its tool lock. Existing resource constraints still apply: UI Automation
@@ -754,6 +758,13 @@ If your MCP client runs inside Electron and you want to automate its windows too
 
 When a window stops answering UI Automation (its UI thread is busy, deadlocked, or still starting up), `Snapshot`, `WaitFor` and other UI-tree tools now skip that window after one timeout. The window is reported as a failed capture, and the rest of the desktop is still returned. Previously the call waited until the window recovered, and every later tool call queued behind it. Raise these values only if an application legitimately needs longer for a single accessibility call. To stop traversing an application at all, use `WINDOWS_MCP_EXCLUDE_PROCESSES`.
 
+### Input and shell latency
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_INPUT_SETTLE_MS` | `30` | Milliseconds to wait after each injected click, key chord or wheel tick before the tool returns. Replaces the fixed 500 ms wait inherited from python-uiautomation, which made every `Click`/`Shortcut` cost over half a second. Accepts `0`–`5000`; invalid values use the default. Set `500` to restore the old timing. Consecutive clicks at the same spot still wait out the system double-click time so they never merge into a double-click, and `Type` polls (up to 200 ms) for the clicked window to take the foreground before sending keys. |
+| `WINDOWS_MCP_POWERSHELL_SESSION` | `on` | Run `PowerShell`, `Registry`, `App` and `Notification` commands in one long-lived PowerShell process instead of starting `powershell.exe` (about 1 s) per call. Set to `off`/`0`/`false`/`no` to always start a fresh process. Each command still starts in the home directory with the session's start-up environment (location, `$env:` changes, `$LASTEXITCODE` and `$Error` are reset; plain variables and functions are scoped to the command), but `$global:` variables, imported modules and `Add-Type` types persist. `exit N` returns `N` and restarts the session. A call that times out kills the session and only the processes that call started (apps launched by earlier calls survive); the next call starts a new session. A call that arrives while the session is busy, or when it cannot start, runs in a fresh process as before. Errors come back as plain text instead of Windows PowerShell's CLIXML. |
+
 ### Desktop control settings
 
 If a physical key/button release event is missed, the input monitor checks residual
@@ -785,6 +796,36 @@ sampling filters transient readings but cannot distinguish persistent query fail
 | `WINDOWS_MCP_STATELESS_HTTP` | `false` | Set to `1`, `true`, `yes`, or `on` to run `streamable-http` without `Mcp-Session-Id` connection state. Useful for reconnects after restarts and for horizontally scaled deployments. |
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/cursortouch-windows-mcp-badge.png)](https://mseep.ai/app/cursortouch-windows-mcp)
+
+### Click target resolver
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_RESOLVER_MIN_CONFIDENCE` | `0.7` | `Click`/`Type` with `target=` act only at or above this confidence (`0`–`1`). Below it they click nothing and return the top candidates instead. |
+| `WINDOWS_MCP_RESOLVER_VISION` | _(off)_ | Set to `anthropic` (or `on`) to enable the tier-2 vision fallback. Off by default. |
+| `WINDOWS_MCP_RESOLVER_MODEL` | `claude-haiku-5-5` | Vision model used by tier 2. The key comes from `ANTHROPIC_API_KEY`. |
+| `WINDOWS_MCP_RESOLVER_VISION_TIMEOUT` | `3.0` | Seconds allowed for one tier-2 request. On timeout, HTTP error or a "none" answer the resolver falls back to the tier-1 result and does not click. |
+
+**Privacy note:** tier 1 (accessibility) never leaves the machine. Tier 2 is the only part of the resolver that sends data off the machine: when `WINDOWS_MCP_RESOLVER_VISION` is set *and* accessibility matching is weak (or the window exposes almost no elements), it sends a downscaled JPEG of **the target window only**, with numbered boxes drawn on it, plus the target text, to the configured provider (`api.anthropic.com`). Having `ANTHROPIC_API_KEY` in the environment does not enable it. Leave the variable unset if window contents must not leave the machine.
+### Apps & skills
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_APPS_TTL` | `21600` (6 h) | Seconds the installed-app inventory (memory and `%LOCALAPPDATA%\windows-mcp\Cache\apps-inventory.json`) stays fresh before `Apps`/`AppSkill` rebuild it. `Apps(mode="refresh")` rebuilds it immediately. |
+| `WINDOWS_MCP_SKILLS_DIR` | `%LOCALAPPDATA%\windows-mcp\skills` | Folder for user and generated skills. Bundled skills always load from the package. |
+
+### Tasks and RunParallel
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_TASKS_FILE` | _(off)_ | Persist task plans as JSON so a restart keeps them. `1`/`true`/`default` uses `tasks.json` in the platformdirs user data dir (`%LOCALAPPDATA%\windows-mcp`); any other value is a file path. Tasks that were `running` at a crash reload as `failed`. |
+| `WINDOWS_MCP_TASK_EVENTS_FILE` | _(off)_ | Append every task/plan event as one JSON line to this file. |
+| `WINDOWS_MCP_TASK_WEBHOOK` | _(off)_ | POST every event as JSON to this URL from one background thread (fire-and-forget, ordered, bounded queue). |
+| `WINDOWS_MCP_TASK_WEBHOOK_TOKEN` | _(none)_ | Sent as `Authorization: Bearer <token>` on webhook posts. |
+| `WINDOWS_MCP_TASK_WEBHOOK_TIMEOUT` | `2.0` | Seconds per webhook POST. |
+| `WINDOWS_MCP_PARALLEL_MAX` | `4` | Default `RunParallel` background concurrency (max 16). |
+| `WINDOWS_MCP_PARALLEL_TIMEOUT` | `60` | Default per-call timeout (seconds) for `RunParallel` background calls. |
+| `WINDOWS_MCP_SCREEN_LOCK_TIMEOUT` | `60` | Seconds a screen-touching call waits for the screen lock before failing with `SCREEN_BUSY`. |
 
 ### Telemetry
 
@@ -845,8 +886,9 @@ Remote (with auth + IP allowlist + TLS):
 
 MCP Client can access the following tools to interact with Windows:
 
-- `Click`: Click on the screen at the given coordinates.
-- `Type`: Type text on an element (optionally clears existing text).
+- `Click`: Click on the screen at the given coordinates, on a Snapshot label, or on a `target` described in words (`Click(target="Save button")`, `Click(target="Seven")`, `Click(target="File > Save As")`). A target is resolved inside the server from the accessibility tree of the foreground window (or `window="Spotify"`), in ~10–40 ms on simple windows and up to ~200 ms on large dialogs (measured on a Win10 VM), so no Snapshot round trip is needed. Optional `control_type` (`button`, `edit`, `menu`, `tab`, `link`, `checkbox`, ...) and `nth` (1-based, reading order) disambiguate. Words like "button", "box"/"field", "tab", "link", "checkbox" and "menu" in the target act as control-type hints. If the best match is below `WINDOWS_MCP_RESOLVER_MIN_CONFIDENCE`, nothing is clicked and the tool returns an error listing the top 3 candidates (name, type, location, score). The result names what was resolved, e.g. `resolved: "Seven" (button) via uia in 23 ms, confidence 1.00`.
+- `Locate`: Read-only counterpart of `Click(target=...)`: returns the best match and top candidates without clicking. For a path only the first step can be located.
+- `Type`: Type text on an element (optionally clears existing text). Accepts `target` (e.g. `Type(target="search box", text="cats")`) to find the field by name, preferring edit fields.
 - `Scroll`: Scroll vertically or horizontally on the window or specific regions.
 - `Move`: Move mouse pointer or drag (set drag=True) to coordinates. For deterministic
   drag, set `from_loc=[x, y]` with `drag=True` to press at an explicit start point and
@@ -870,6 +912,42 @@ MCP Client can access the following tools to interact with Windows:
 - `Process`: List running processes or terminate them by PID or name.
 - `Notification`: Send a Windows toast notification with a title and message. Optional `app_id` (a registered AppUserModelID, e.g. `Microsoft.Windows.Explorer`) picks the app it appears under; it defaults to Windows PowerShell.
 - `Registry`: Read, write, delete, or list Windows Registry values and keys.
+- `Apps`: Installed-app inventory merged from Start-menu entries (AUMIDs), AppX packages, uninstall registry keys and URL protocol handlers. `mode="list"` prints one line per app (`name [id] | skill=<name>(source) | uri=<schemes> | proc=<process>`) with an optional fuzzy `query` and `limit`; `mode="info"` returns the full record plus a skill summary; `mode="refresh"` rebuilds the cached inventory and reloads skills.
+- `AppSkill`: Returns the markdown skill for an app (launch commands and URI deep links, keyboard shortcuts, recipes using these tools, UI quirks) by skill name, app name, alias or process. Precedence is builtin > user > generated. `generate=true` builds a skill from the app's menu bar (`&` access keys and `Tab` accelerators), ribbon KeyTips and a bounded UI Automation walk, launching the app if needed and closing it afterwards; `regenerate=true` rebuilds a generated skill. Builtin and user skills are never overwritten. Skills are also exposed as MCP resources at `skill://<name>` (and `skill://index`). When the foreground window's app has a skill, `Snapshot` adds one line pointing to it.
+
+### App skills
+
+A skill is a markdown file with a small YAML frontmatter, one file per app:
+
+```markdown
+---
+name: spotify
+title: Spotify
+description: Spotify music player; play, search, pause, skip and change volume.
+version: 1
+source: builtin            # builtin | user | generated
+match:
+  process: [spotify.exe]   # lowercase process names
+  aumid: ["SpotifyAB.SpotifyMusic_*", Spotify]   # fnmatch patterns
+  name: [Spotify, "Spotify *"]                   # window-title / display-name patterns
+  exe: [spotify.exe]
+uri_schemes: [spotify]     # without the trailing colon
+---
+
+# Spotify
+
+## What it's for
+## Launch and deep links
+## Keyboard shortcuts
+## Recipes
+## UI quirks and accessibility notes
+```
+
+Bundled skills live in `src/windows_mcp/skills/builtin/` (File Explorer, Settings, Edge, Chrome, Notepad, Calculator, Spotify, Word, Excel, PowerPoint, Outlook, Teams, VS Code, Discord, Windows Terminal/PowerShell, Paint, Snipping Tool, Task Manager). Drop your own `.md` files into the user skill folder (`WINDOWS_MCP_SKILLS_DIR`); generated skills are written there too, with `source: generated`. The frontmatter is a deliberately small YAML subset (scalars, inline or block lists, one nested `match` map), so other tools can index or write skills without a YAML library.
+- `Tasks`: Track a multi-step request as a plan of dependent tasks (`plan`, `add`, `update`, `next`, `list`, `get`, `cancel`, `clear`, `events`). Validates the dependency graph (no cycles, no unknown ids), enforces status transitions, and splits ready tasks into a sequential screen lane and a parallel background lane. Every change emits a `task_event` (MCP log notification on logger `windows-mcp.tasks`, plus an optional JSON-lines file and webhook). Never gated, so the UI keeps updating during a user takeover. See [docs/INTEGRATION.md](docs/INTEGRATION.md).
+- `RunParallel`: Run several tool calls in one turn. Background calls run concurrently (bounded, per-call timeout); screen calls (`Click`, `Type`, `Scroll`, `Move`, `Shortcut`, `MultiSelect`, `MultiEdit`, `App` switch/resize) run one at a time, in order, through the screen lock. Each inner call passes the same control gate and policy as a direct call. Results come back in input order with per-call latency and error; calls with `task_id` update their task automatically.
+
+Screen-touching tools never interleave, even when a client sends concurrent requests: a process-wide FIFO screen lock serializes them at the tool boundary and fails with `SCREEN_BUSY` after `WINDOWS_MCP_SCREEN_LOCK_TIMEOUT` seconds.
 
 
 ## 🤝 Connect with Us

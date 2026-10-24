@@ -13,6 +13,8 @@ from windows_mcp.tools._snapshot_helpers import (
     build_snapshot_response,
 )
 
+from windows_mcp.tools.apps import foreground_skill_hint
+
 logger = logging.getLogger(__name__)
 
 # Populated by register(); exposed for backward-compatible test imports.
@@ -73,7 +75,12 @@ def register(mcp, *, get_desktop, get_analytics):
             )
             return [f'Error capturing desktop state: {str(e)}. Please try again.']
 
-        return build_snapshot_response(capture_result, include_ui_details=True)
+        response = build_snapshot_response(capture_result, include_ui_details=True)
+        desktop_state = capture_result.get("desktop_state")
+        hint = foreground_skill_hint(getattr(desktop_state, "active_window", None))
+        if hint and response and isinstance(response[0], str):
+            response[0] = f"{response[0].rstrip()}\n\n{hint}\n"
+        return response
 
     @mcp.tool(
         name='Screenshot',

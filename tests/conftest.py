@@ -1,4 +1,5 @@
 import os
+import sys
 
 import pytest
 
@@ -10,6 +11,19 @@ os.environ.setdefault("WINDOWS_MCP_DISABLE_FLASH", "1")
 
 from windows_mcp.tree.views import BoundingBox, Center, TreeElementNode, ScrollElementNode
 from windows_mcp.desktop.views import Window, Status, DesktopState
+
+
+@pytest.fixture(autouse=True)
+def _reset_powershell_sessions():
+    """Stop persistent PowerShell sessions after each test.
+
+    A session left running by one test would otherwise be reused by the next,
+    hiding environment changes and Popen spies that test sets up.
+    """
+    yield
+    service = sys.modules.get("windows_mcp.powershell.service")
+    if service is not None:
+        service.shutdown_sessions()
 
 
 @pytest.fixture

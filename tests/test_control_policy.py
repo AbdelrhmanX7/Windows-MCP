@@ -21,7 +21,7 @@ from windows_mcp.tools.control_policy import CLASSIFIED_TOOLS, MODES, requires_c
         (name, {}, "direct")
         for name in ("Click", "Type", "Scroll", "Move", "Shortcut", "MultiSelect", "MultiEdit")
     ]
-    + [(name, {}, "possible") for name in ("PowerShell", "Notification")]
+    + [(name, {}, "possible") for name in ("PowerShell", "Notification", "AppSkill")]
     + [
         (name, {}, "other")
         for name in (
@@ -33,6 +33,8 @@ from windows_mcp.tools.control_policy import CLASSIFIED_TOOLS, MODES, requires_c
             "Wait",
             "WaitFor",
             "DisplayInventory",
+            "Locate",
+            "Apps",
         )
     ]
     + [
@@ -196,3 +198,12 @@ async def test_protected_call_can_run_while_background_is_running():
     finally:
         release.set()
         await asyncio.wait_for(task, 2)
+
+
+def test_app_skill_generate_is_a_screen_call():
+    from windows_mcp.tools.control_policy import category, is_screen_call
+
+    assert category("AppSkill", {"name": "notepad"}) == "possible"
+    assert is_screen_call("AppSkill", {"name": "notepad", "generate": True})
+    assert is_screen_call("AppSkill", {"name": "notepad", "regenerate": True})
+    assert not is_screen_call("Apps", {"mode": "list"})
