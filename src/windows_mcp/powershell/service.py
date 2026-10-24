@@ -367,8 +367,26 @@ class PowerShellExecutor:
 
     @staticmethod
     def execute_command(
-            command: str, timeout: int = 10, shell: str | None = None
+            command: str, timeout: int = 10, shell: str | None = None, elevated: bool = False
     ) -> tuple[str, int]:
+        if elevated and not is_elevated():
+            # Run through the persistent elevated worker (one UAC consent per session).
+            # When the server is already elevated this flag is a no-op and we fall through.
+            from windows_mcp.elevation.client import ElevationUnavailable, call_elevated
+
+            try:
+                return call_elevated(
+                    "powershell", command, timeout=float(timeout), shell=shell
+                )
+            except ElevationUnavailable as exc:
+                return (
+                    f"Elevated execution unavailable: {exc}\n"
+                    "Install the no-prompt worker with `windows-mcp install-elevated`, "
+                    f"or set {('WINDOWS_MCP_ELEVATION')}=runas to allow a UAC prompt.",
+                    1,
+                )
+            except RuntimeError as exc:
+                return (f"Elevated execution failed: {exc}", 1)
         try:
             env = _prepare_env()
             # NO_COLOR suppresses ANSI escape sequences in pwsh 7.2+ (and many other CLI tools).

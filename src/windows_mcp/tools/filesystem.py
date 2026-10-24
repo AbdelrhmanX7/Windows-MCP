@@ -13,7 +13,7 @@ from fastmcp import Context
 def register(mcp, *, get_desktop, get_analytics):
     @mcp.tool(
         name='FileSystem',
-        description="Manages file system operations with eight modes: 'read' (read text file contents with optional line offset/limit), 'write' (create or overwrite a file, set append=True to append), 'copy' (copy file or directory to destination), 'move' (move or rename file/directory), 'delete' (delete file or directory, set recursive=True for non-empty dirs), 'list' (list directory contents with optional pattern filter), 'search' (find files matching a glob pattern), 'info' (get file/directory metadata like size, dates, type). Relative paths are resolved from the user's Desktop folder. Use absolute paths to access other locations.",
+        description="Manages file system operations with eight modes: 'read' (read text file contents with optional line offset/limit), 'write' (create or overwrite a file, set append=True to append), 'copy' (copy file or directory to destination), 'move' (move or rename file/directory), 'delete' (delete file or directory, set recursive=True for non-empty dirs), 'list' (list directory contents with optional pattern filter), 'search' (find files matching a glob pattern), 'info' (get file/directory metadata like size, dates, type). Relative paths are resolved from the user's Desktop folder. Use absolute paths to access other locations. Set elevated=true to read/write/copy/move/delete in admin-only locations like Program Files or a protected system path; it runs through the elevated worker (one UAC consent per session, no-op when the server is already elevated).",
         annotations=ToolAnnotations(
             title="FileSystem",
             readOnlyHint=False,
@@ -36,6 +36,7 @@ def register(mcp, *, get_desktop, get_analytics):
         limit: int | None = None,
         encoding: str = 'utf-8',
         show_hidden: bool | str = False,
+        elevated: bool | str = False,
         ctx: Context = None,
     ) -> str:
         try:
@@ -50,32 +51,42 @@ def register(mcp, *, get_desktop, get_analytics):
             append = _as_bool(append, 'append')
             overwrite = _as_bool(overwrite, 'overwrite')
             show_hidden = _as_bool(show_hidden, 'show_hidden')
+            elevated = _as_bool(elevated, 'elevated')
+
+            def _run(op: str, func, *args, **kwargs) -> str:
+                # Elevated calls run the same service function inside the admin worker,
+                # with the paths already resolved to absolute here.
+                if elevated:
+                    from windows_mcp.elevation.invoke import run_elevated_text
+
+                    return run_elevated_text(f"filesystem.{op}", *args, **kwargs)
+                return func(*args, **kwargs)
 
             match mode:
                 case 'read':
-                    return filesystem.read_file(path, offset=offset, limit=limit, encoding=encoding)
+                    return _run('read_file', filesystem.read_file, path, offset=offset, limit=limit, encoding=encoding)
                 case 'write':
                     if content is None:
                         return 'Error: content parameter is required for write mode.'
-                    return filesystem.write_file(path, content, append=append, encoding=encoding)
+                    return _run('write_file', filesystem.write_file, path, content, append=append, encoding=encoding)
                 case 'copy':
                     if destination is None:
                         return 'Error: destination parameter is required for copy mode.'
-                    return filesystem.copy_path(path, destination, overwrite=overwrite)
+                    return _run('copy_path', filesystem.copy_path, path, destination, overwrite=overwrite)
                 case 'move':
                     if destination is None:
                         return 'Error: destination parameter is required for move mode.'
-                    return filesystem.move_path(path, destination, overwrite=overwrite)
+                    return _run('move_path', filesystem.move_path, path, destination, overwrite=overwrite)
                 case 'delete':
-                    return filesystem.delete_path(path, recursive=recursive)
+                    return _run('delete_path', filesystem.delete_path, path, recursive=recursive)
                 case 'list':
-                    return filesystem.list_directory(path, pattern=pattern, recursive=recursive, show_hidden=show_hidden)
+                    return _run('list_directory', filesystem.list_directory, path, pattern=pattern, recursive=recursive, show_hidden=show_hidden)
                 case 'search':
                     if pattern is None:
                         return 'Error: pattern parameter is required for search mode.'
-                    return filesystem.search_files(path, pattern, recursive=recursive)
+                    return _run('search_files', filesystem.search_files, path, pattern, recursive=recursive)
                 case 'info':
-                    return filesystem.get_file_info(path)
+                    return _run('get_file_info', filesystem.get_file_info, path)
                 case _:
                     return f'Error: Unknown mode "{mode}". Use: read, write, copy, move, delete, list, search, info.'
         except Exception as e:

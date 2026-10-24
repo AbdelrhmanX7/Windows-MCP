@@ -3,6 +3,7 @@
 from typing import Literal
 
 from mcp.types import ToolAnnotations
+from windows_mcp.desktop.utils import as_bool as _as_bool
 from windows_mcp.infrastructure import with_analytics
 from fastmcp import Context
 from windows_mcp import process
@@ -11,7 +12,7 @@ from windows_mcp import process
 def register(mcp, *, get_desktop, get_analytics):
     @mcp.tool(
         name="Process",
-        description='List and kill running processes. Keywords: task manager, running tasks, kill, terminate, stop process, PID, CPU, memory usage. Use mode="list" to list running processes with filtering and sorting options. Use mode="kill" to terminate processes by PID or name. Prefer an exact PID. If the target is known to belong to the user or termination is known to disrupt their work, obtain permission first, reusing existing authorization. Unknown ownership alone does not require refusal. Ownership and approval are not enforced by this tool.',
+        description='List and kill running processes. Keywords: task manager, running tasks, kill, terminate, stop process, PID, CPU, memory usage, admin, elevated. Use mode="list" to list running processes with filtering and sorting options. Use mode="kill" to terminate processes by PID or name. Set elevated=true to kill a process owned by another user or an elevated process (Access denied otherwise); it runs through the elevated worker (one UAC consent per session, no-op when already elevated). Prefer an exact PID. If the target is known to belong to the user or termination is known to disrupt their work, obtain permission first, reusing existing authorization. Unknown ownership alone does not require refusal. Ownership and approval are not enforced by this tool.',
         annotations=ToolAnnotations(
             title="Process",
             readOnlyHint=False,
@@ -28,6 +29,7 @@ def register(mcp, *, get_desktop, get_analytics):
         sort_by: Literal["memory", "cpu", "name"] = "memory",
         limit: int = 20,
         force: bool | str = False,
+        elevated: bool | str = False,
         ctx: Context = None,
     ) -> str:
         try:
@@ -35,6 +37,12 @@ def register(mcp, *, get_desktop, get_analytics):
                 return process.list_processes(name=name, sort_by=sort_by, limit=limit)
             elif mode == "kill":
                 force = force is True or (isinstance(force, str) and force.lower() == "true")
+                if _as_bool(elevated, "elevated"):
+                    from windows_mcp.elevation.invoke import run_elevated_text
+
+                    return run_elevated_text(
+                        "process.kill_process", name=name, pid=pid, force=force
+                    )
                 return process.kill_process(name=name, pid=pid, force=force)
             else:
                 return 'Error: mode must be either "list" or "kill".'

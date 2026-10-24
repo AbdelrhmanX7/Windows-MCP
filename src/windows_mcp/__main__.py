@@ -440,6 +440,12 @@ def _build_mcp() -> FastMCP:
                         control_overlay.stop()
                 finally:
                     logger.debug("Shutting down: stopping watchdog and analytics")
+                    try:
+                        from windows_mcp.elevation.client import shutdown_worker
+
+                        shutdown_worker()
+                    except Exception:
+                        logger.debug("Elevated worker shutdown failed", exc_info=True)
                     stop_guard()
                     if watchdog:
                         watchdog.stop()
@@ -934,6 +940,16 @@ def serve(
             mcp.custom_route(path, methods=methods)(handler)
         oauth_validator = lambda tok: validate_oauth_token(oauth_store, tok)  # noqa: E731
 
+    from windows_mcp.elevation import integrity_level, is_admin
+    from windows_mcp.elevation.client import launch_mode
+
+    logger.info(
+        "windows-mcp elevation: is_admin=%s integrity=%s elevation_mode=%s",
+        is_admin(),
+        integrity_level(),
+        launch_mode(),
+    )
+
     scheme = "https" if ssl_certfile else "http"
     logger.debug(
         "Starting windows-mcp (transport=%s, %s, auth=%s, oauth=%s, ip-allowlist=%s, cors=%s, tools=%s, exclude=%s)",
@@ -1155,6 +1171,148 @@ def uninstall() -> None:
         click.echo(f"Removed {_START_SCRIPT_PATH}")
 
     click.echo("windows-mcp will no longer start at login.")
+
+
+def _self_elevate_cli(args: list[str]) -> int:
+    """Re-run this CLI elevated via ``runas`` (one UAC consent) and wait for it.
+
+    Args:
+        args: The arguments after the program (e.g. ``["install-elevated", ...]``).
+
+    Returns:
+        The elevated process's exit code.
+    """
+    from windows_mcp.elevation import launch
+
+    program = _resolve_program()
+    proc = launch.shell_execute_runas(program[0], program[1:] + args, show=True)
+    return proc.wait() or 0
+
+
+@main.command(name="install-elevated")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Loopback bind address.")
+@click.option("--port", default=8000, show_default=True, type=int, help="Port to bind.")
+@click.option("--no-server", is_flag=True, help="Only the elevated worker, not the server task.")
+@click.option("--no-worker", is_flag=True, help="Only the elevated server task, not the worker.")
+@click.option("--run", is_flag=True, help="Start the elevated server task right after installing.")
+def install_elevated(host: str, port: int, no_server: bool, no_worker: bool, run: bool) -> None:
+    """Register scheduled tasks that start the server (and worker) elevated, no UAC prompt.
+
+    Registering a RunLevel-Highest task needs elevation, so this self-elevates once.
+    After that the elevated server and the ``elevated=true`` worker start with no prompt.
+    """
+    from windows_mcp.elevation import is_admin
+    from windows_mcp.elevation import launch, setup
+
+    if not is_admin():
+        click.echo("Requesting administrator rights to register the admin-mode tasks...")
+        try:
+            code = _self_elevate_cli(
+                [
+                    "install-elevated",
+                    "--host",
+                    host,
+                    "--port",
+                    str(port),
+                    *(["--no-server"] if no_server else []),
+                    *(["--no-worker"] if no_worker else []),
+                    *(["--run"] if run else []),
+                ]
+            )
+        except launch.ElevationError as exc:
+            raise click.ClickException(str(exc))
+        if code != 0:
+            raise click.ClickException(f"Elevated install exited with code {code}.")
+        click.echo("Admin-mode tasks installed.")
+        return
+
+    try:
+        registered = setup.install(
+            host=host, port=port, include_server=not no_server, include_worker=not no_worker
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
+
+    _echo_section("Admin mode installed")
+    for name in registered:
+        click.echo(f"  Task: {name}")
+    if not no_server:
+        click.echo(f"\nElevated server (when started): http://{host}:{port}/mcp/")
+        click.echo(f"  Start it:  windows-mcp run-elevated --task   (or: schtasks /Run /TN {setup.SERVER_TASK_NAME})")
+    if not no_worker:
+        click.echo("\nThe elevated worker starts on demand for PowerShell(elevated=true) — no prompt.")
+    if run and not no_server:
+        try:
+            launch.run_task(setup.SERVER_TASK_NAME)
+            click.echo(f"\nStarted {setup.SERVER_TASK_NAME}.")
+        except launch.ElevationError as exc:
+            raise click.ClickException(str(exc))
+    click.echo("\nRemove with `windows-mcp uninstall-elevated`.")
+
+
+@main.command(name="uninstall-elevated")
+def uninstall_elevated() -> None:
+    """Remove the admin-mode scheduled tasks (self-elevates once)."""
+    from windows_mcp.elevation import is_admin, launch, setup
+
+    if not is_admin():
+        click.echo("Requesting administrator rights to remove the admin-mode tasks...")
+        try:
+            code = _self_elevate_cli(["uninstall-elevated"])
+        except launch.ElevationError as exc:
+            raise click.ClickException(str(exc))
+        if code != 0:
+            raise click.ClickException(f"Elevated uninstall exited with code {code}.")
+        click.echo("Admin-mode tasks removed.")
+        return
+
+    removed = setup.uninstall()
+    if removed:
+        for name in removed:
+            click.echo(f"Removed {name}.")
+    else:
+        click.echo("No admin-mode tasks were installed.")
+
+
+@main.command(name="run-elevated")
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "sse", "streamable-http"]),
+    default="streamable-http",
+    show_default=True,
+    help="Transport for the elevated server (stdio works for a local host that spawns it).",
+)
+@click.option("--host", default="127.0.0.1", show_default=True, help="Host to bind.")
+@click.option("--port", default=8000, show_default=True, type=int, help="Port to bind.")
+@click.option("--task", is_flag=True, help="Start the installed elevated-server task instead of runas.")
+def run_elevated(transport: str, host: str, port: int, task: bool) -> None:
+    """Start one elevated server for ad-hoc use (one UAC consent), or run the task."""
+    from windows_mcp.elevation import is_admin, launch, setup
+
+    if task:
+        try:
+            launch.run_task(setup.SERVER_TASK_NAME)
+        except launch.ElevationError as exc:
+            raise click.ClickException(
+                f"{exc}\nInstall it first with `windows-mcp install-elevated`."
+            )
+        click.echo(f"Started {setup.SERVER_TASK_NAME}.")
+        return
+
+    if is_admin():
+        click.echo("Already elevated — serving directly.")
+        ctx = click.get_current_context()
+        ctx.invoke(serve, transport=transport, host=host, port=port)
+        return
+
+    args = ["serve", "--transport", transport, "--host", host, "--port", str(port)]
+    click.echo("Requesting administrator rights to start the server elevated...")
+    program = _resolve_program()
+    try:
+        proc = launch.shell_execute_runas(program[0], program[1:] + args, show=True)
+    except launch.ElevationError as exc:
+        raise click.ClickException(str(exc))
+    click.echo(f"Elevated server started (pid {proc.pid}) at {transport} {host}:{port}.")
 
 
 @main.command()
