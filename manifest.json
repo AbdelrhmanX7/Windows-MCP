@@ -157,7 +157,7 @@
     },
     {
       "name": "Notification",
-      "description": "Sends a Windows toast notification with a title and message."
+      "description": "Sends a Windows toast notification with a title and message. Optional app_id selects the registered AppUserModelID it appears under (defaults to Windows PowerShell)."
     },
     {
       "name": "Registry",

@@ -2,27 +2,33 @@ from windows_mcp.powershell import PowerShellExecutor
 from windows_mcp.powershell.utils import ps_quote, ps_quote_for_xml
 
 __all__ = [
+    "DEFAULT_APP_ID",
     "send_notification",
 ]
 
+#: AppUserModelID of Windows PowerShell 5.1. Its Start-menu shortcut ships with every
+#: Windows 10/11 install, so the ID is always registered and toasts sent under it are shown.
+DEFAULT_APP_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
 
-def send_notification(title: str, message: str, app_id: str) -> str:
+
+def send_notification(title: str, message: str, app_id: str | None = None) -> str:
     """Send a Windows toast notification with a title and message.
 
     Args:
         title: The title of the notification.
         message: The message of the notification.
-        app_id: The valid Application User Model ID of the toast notification.
-            Required to display the notification in a specific app.
+        app_id: Application User Model ID the toast is shown under. Must be registered
+            (have a Start-menu shortcut). Defaults to ``DEFAULT_APP_ID`` (Windows PowerShell).
 
     Returns:
         A string indicating the result of the notification.
 
     Notes:
-        The MCP client MUST provide an App ID because Windows uses it as the
-        app identity for desktop toast notifications, and it MUST match a
-        registered shortcut/AppUserModelID.
+        Windows uses the App ID as the app identity for desktop toast notifications
+        and silently drops toasts whose ID does not match a registered
+        shortcut/AppUserModelID, hence the always-registered default.
     """
+    app_id = app_id or DEFAULT_APP_ID
     safe_title = ps_quote_for_xml(title)
     safe_message = ps_quote_for_xml(message)
     safe_app_id = ps_quote(app_id)
