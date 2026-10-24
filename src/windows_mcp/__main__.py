@@ -302,13 +302,20 @@ async def _warm_up_capture(desktop: Any) -> None:
     Args:
         desktop: The server's Desktop instance.
     """
+    from windows_mcp.desktop import screenshot as screenshot_capture
     from windows_mcp.infrastructure import run_uia_affine
 
     try:
+        # The dxcam import runs on its own thread; until it is done, captures use mss/pillow
+        # rather than queueing behind it, so an immediate first Screenshot is not delayed.
+        preload = screenshot_capture.preload_dxcam()
         await asyncio.to_thread(_prewarm_first_call_imports)
+        if preload is not None:
+            await asyncio.to_thread(preload.join)
     except Exception:
         logger.debug("First-call import warm-up failed", exc_info=True)
     try:
+        # Opening the camera is quick; it runs on the UIA worker that captures later.
         await run_uia_affine(desktop.warm_up_capture)
     except Exception:
         logger.debug("Capture warm-up failed", exc_info=True)

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import ctypes
 import logging
 import os
+import threading
 from typing import Any
 from _ctypes import COMError
 
@@ -18,17 +19,51 @@ _DXCAM_UNLOADED: Any = object()
 dxcam: Any = _DXCAM_UNLOADED
 
 
+_dxcam_load_lock = threading.Lock()
+_dxcam_preload_thread: threading.Thread | None = None
+
+
 def _load_dxcam() -> Any:
     """Import dxcam on first use and return the module, or ``None`` when it is unusable."""
     global dxcam
     if dxcam is _DXCAM_UNLOADED:
-        try:
-            import dxcam as module
-        except Exception:
-            logger.debug("dxcam is unavailable; DXGI capture disabled", exc_info=True)
-            module = None
-        dxcam = module
+        with _dxcam_load_lock:
+            if dxcam is _DXCAM_UNLOADED:
+                try:
+                    import dxcam as module
+                except Exception:
+                    logger.debug("dxcam is unavailable; DXGI capture disabled", exc_info=True)
+                    module = None
+                dxcam = module
     return dxcam
+
+
+def preload_dxcam() -> threading.Thread | None:
+    """Start importing dxcam on a daemon thread, unless it is loaded or not wanted.
+
+    The import (numpy plus DXGI adapter enumeration, ~200 ms) never touches the
+    comtypes.gen cache, so it is safe off the UIA worker. While it runs, ``auto``
+    captures use the next backend instead of waiting for it.
+
+    Returns:
+        The preload thread, or ``None`` when nothing needed loading.
+    """
+    global _dxcam_preload_thread
+    if dxcam is not _DXCAM_UNLOADED or get_screenshot_backend() not in ("auto", "dxcam"):
+        return None
+    with _dxcam_load_lock:
+        if _dxcam_preload_thread is None:
+            _dxcam_preload_thread = threading.Thread(
+                target=_load_dxcam, name="windows-mcp-dxcam-preload", daemon=True
+            )
+            _dxcam_preload_thread.start()
+        return _dxcam_preload_thread
+
+
+def _dxcam_preloading() -> bool:
+    """Return whether the background dxcam import is still running."""
+    thread = _dxcam_preload_thread
+    return thread is not None and thread.is_alive() and dxcam is _DXCAM_UNLOADED
 
 
 try:
@@ -444,8 +479,8 @@ def _is_usable_capture(image: Image.Image | None) -> bool:
 def warm_up() -> None:
     """Load dxcam and open the desktop-duplication camera ahead of the first capture.
 
-    Run in the background after the server is up, on the UIA worker that later captures, so
-    the first Screenshot does not pay for importing dxcam/numpy and creating the camera. Does
+    Run on the UIA worker that later captures, after :func:`preload_dxcam` finished, so the
+    first dxcam capture does not pay for importing dxcam/numpy and creating the camera. Does
     nothing when another backend is forced; never raises.
     """
     if get_screenshot_backend() not in ("auto", "dxcam"):
@@ -485,6 +520,9 @@ def capture(
     failures: list[tuple[str, BaseException]] = []
     for backend_cls in chain:
         if backend_cls.name in _degraded_backends:
+            continue
+        if selected == "auto" and backend_cls.name == "dxcam" and _dxcam_preloading():
+            # Do not block an early capture on the background import; mss/pillow serve it.
             continue
         inst = _get_backend(backend_cls.name)
         try:

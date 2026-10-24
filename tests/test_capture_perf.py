@@ -473,3 +473,58 @@ class TestFirstCallPrewarm:
 
         for name in main_module._FIRST_CALL_MODULES:
             assert importlib.util.find_spec(name) is not None, name
+
+
+class TestDxcamPreload:
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch):
+        import windows_mcp.desktop.screenshot as screenshot
+
+        monkeypatch.setattr(screenshot, "_backend_instances", {})
+        monkeypatch.setattr(screenshot, "_degraded_backends", set())
+        monkeypatch.setattr(screenshot, "_dxcam_preload_thread", None)
+        monkeypatch.delenv("WINDOWS_MCP_SCREENSHOT_BACKEND", raising=False)
+        self.screenshot = screenshot
+
+    def test_preload_imports_on_a_thread(self, monkeypatch):
+        import sys
+        from unittest.mock import MagicMock
+
+        fake = MagicMock()
+        monkeypatch.setattr(self.screenshot, "dxcam", self.screenshot._DXCAM_UNLOADED)
+        monkeypatch.setitem(sys.modules, "dxcam", fake)
+        thread = self.screenshot.preload_dxcam()
+        assert thread is not None
+        thread.join(5)
+        assert self.screenshot.dxcam is fake
+        assert self.screenshot.preload_dxcam() is None
+
+    def test_preload_skipped_for_forced_other_backend(self, monkeypatch):
+        monkeypatch.setattr(self.screenshot, "dxcam", self.screenshot._DXCAM_UNLOADED)
+        monkeypatch.setenv("WINDOWS_MCP_SCREENSHOT_BACKEND", "pillow")
+        assert self.screenshot.preload_dxcam() is None
+
+    def test_auto_capture_skips_dxcam_while_it_is_loading(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from windows_mcp.uia import Rect
+
+        monkeypatch.setattr(self.screenshot, "dxcam", self.screenshot._DXCAM_UNLOADED)
+        monkeypatch.setattr(self.screenshot, "_dxcam_preloading", lambda: True)
+        dxcam_backend = self.screenshot._get_backend("dxcam")
+        monkeypatch.setattr(dxcam_backend, "is_available", MagicMock(return_value=True))
+        monkeypatch.setattr(dxcam_backend, "capture", MagicMock())
+        if self.screenshot.mss is not None:
+            monkeypatch.setattr(
+                self.screenshot._get_backend("mss"), "is_available", lambda r: False
+            )
+        pillow = self.screenshot._get_backend("pillow")
+        frame = Image.new("RGB", (4, 4))
+        monkeypatch.setattr(pillow, "capture", lambda rect: frame)
+        image, used = self.screenshot.capture(Rect(0, 0, 4, 4))
+        assert used == "pillow"
+        assert image is frame
+        dxcam_backend.capture.assert_not_called()
+
+    def test_preloading_is_false_without_a_thread(self):
+        assert self.screenshot._dxcam_preloading() is False

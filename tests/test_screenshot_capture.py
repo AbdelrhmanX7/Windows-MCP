@@ -41,6 +41,7 @@ def _isolate_backend_instances(monkeypatch):
     """Ensure each test gets a fresh backend instance pool and no retired backends."""
     monkeypatch.setattr(screenshot, "_backend_instances", {})
     monkeypatch.setattr(screenshot, "_degraded_backends", set())
+    monkeypatch.setattr(screenshot, "_dxcam_preload_thread", None)
 
 
 def bgra_frame(width: int, height: int, rgb=(255, 0, 0)):
