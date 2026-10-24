@@ -22,10 +22,10 @@ from windows_mcp.desktop import control_overlay
 from urllib.parse import urljoin
 from locale import getpreferredencoding
 from typing import Literal
-from markdownify import markdownify
 from fuzzywuzzy import process
 from time import sleep, time, perf_counter
 from psutil import Process
+import functools
 import math
 import win32process
 import win32gui
@@ -129,6 +129,15 @@ def _escape_text_for_sendkeys(text: str) -> str:
         else:
             result.append(ch)
     return "".join(result)
+
+
+@functools.lru_cache(maxsize=1)
+def _annotation_font():
+    """Load the annotation label font once instead of re-reading arial.ttf on every capture."""
+    try:
+        return ImageFont.truetype("arial.ttf", 12)
+    except IOError:
+        return ImageFont.load_default()
 
 
 class Desktop:
@@ -309,9 +318,12 @@ class Desktop:
 
             applied_scale = scale
             if scale != 1.0:
+                # reducing_gap lets Pillow box-reduce by an integer factor before the LANCZOS
+                # pass; on 1440p/4K captures that is several times faster and visually the same.
                 screenshot = screenshot.resize(
                     (int(screenshot.width * scale), int(screenshot.height * scale)),
                     Image.LANCZOS,
+                    reducing_gap=3.0,
                 )
 
             if profile_enabled:
@@ -1199,6 +1211,9 @@ class Desktop:
             # non-ASCII pages come back as mojibake. Sniff the body instead.
             response.encoding = response.apparent_encoding or "utf-8"
         html = response.text
+        # Imported on first use: markdownify (and BeautifulSoup) cost ~30-200 ms at startup.
+        from markdownify import markdownify
+
         content = markdownify(html=html)
         return content
 
@@ -1518,6 +1533,14 @@ class Desktop:
             bottom=max(rect.bottom for rect in selected_rects),
         )
 
+    def warm_up_capture(self) -> None:
+        """Preload what the first screenshot would otherwise pay for (dxcam camera, font)."""
+        screenshot_capture.warm_up()
+        try:
+            _annotation_font()
+        except Exception:
+            logger.debug("Annotation font warm-up failed", exc_info=True)
+
     def get_screenshot(self, capture_rect: uia.Rect | None = None) -> Image.Image:
         # The persistent AI indicator is hidden and acknowledged before any
         # screenshot backend reads pixels. Physical input is released first so
@@ -1526,9 +1549,14 @@ class Desktop:
         capture_generation = controller.pause_for_capture()
         restored = False
         try:
-            with control_overlay.suspend_for_capture():
+            with control_overlay.suspend_for_capture() as indicator_hidden:
+                flash_was_showing = flash_overlay.has_active_flash()
                 if not flash_overlay.cancel_active_flash():
                     raise RuntimeError("Previous screenshot flash did not close before capture")
+                if indicator_hidden or flash_was_showing:
+                    # The hidden windows are gone from the window manager, but DXGI returns
+                    # the last presented frame: wait for one composed without them.
+                    screenshot_capture.wait_for_composition()
                 image, used_backend = screenshot_capture.capture(capture_rect)
                 self._last_screenshot_backend = used_backend
             restored = True
@@ -1548,11 +1576,7 @@ class Desktop:
         annotated_screenshot = screenshot.copy()
         draw = ImageDraw.Draw(annotated_screenshot)
         image_width, image_height = annotated_screenshot.size
-        font_size = 12
-        try:
-            font = ImageFont.truetype("arial.ttf", font_size)
-        except IOError:
-            font = ImageFont.load_default()
+        font = _annotation_font()
 
         def get_random_color():
             return "#{:06x}".format(random.randint(0, 0xFFFFFF))

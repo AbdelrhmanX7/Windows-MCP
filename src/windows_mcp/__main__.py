@@ -277,6 +277,50 @@ def _start_watchdog(desktop):
         return None
 
 
+# Modules FastMCP imports lazily while serving the first tool call (its session-state
+# store pulls in py-key-value and beartype, ~300 ms on a cold VM). None touch comtypes.
+_FIRST_CALL_MODULES = (
+    "key_value.aio.adapters.pydantic",
+    "key_value.aio.stores.memory",
+)
+
+
+def _prewarm_first_call_imports() -> None:
+    """Import FastMCP's lazily loaded first-call modules ahead of the first request."""
+    import importlib
+
+    for name in _FIRST_CALL_MODULES:
+        try:
+            importlib.import_module(name)
+        except Exception:
+            logger.debug("Pre-import of %s failed", name, exc_info=True)
+
+
+async def _warm_up_capture(desktop: Any) -> None:
+    """Warm the first-call imports and the capture path without blocking the handshake.
+
+    Args:
+        desktop: The server's Desktop instance.
+    """
+    from windows_mcp.desktop import screenshot as screenshot_capture
+    from windows_mcp.infrastructure import run_uia_affine
+
+    try:
+        # The dxcam import runs on its own thread; until it is done, captures use mss/pillow
+        # rather than queueing behind it, so an immediate first Screenshot is not delayed.
+        preload = screenshot_capture.preload_dxcam()
+        await asyncio.to_thread(_prewarm_first_call_imports)
+        if preload is not None:
+            await asyncio.to_thread(preload.join)
+    except Exception:
+        logger.debug("First-call import warm-up failed", exc_info=True)
+    try:
+        # Opening the camera is quick; it runs on the UIA worker that captures later.
+        await run_uia_affine(desktop.warm_up_capture)
+    except Exception:
+        logger.debug("Capture warm-up failed", exc_info=True)
+
+
 def _build_mcp() -> FastMCP:
     """Create the MCP server instance."""
     global _mcp, _control_notifier
@@ -368,6 +412,7 @@ def _build_mcp() -> FastMCP:
         controller.policy = _control_config.policy
         controller.idle_timeout_seconds = _control_config.idle_timeout_seconds
 
+        warm_up: asyncio.Future | None = None
         try:
             if controller.enabled:
                 control_overlay.start()
@@ -375,9 +420,14 @@ def _build_mcp() -> FastMCP:
             controller.start()
             if controller.enabled:
                 notifier.start()
+            # Warm the capture path in the background on the UIA worker, so the first
+            # Screenshot does not pay for loading dxcam and opening the DXGI camera.
+            warm_up = asyncio.ensure_future(_warm_up_capture(desktop))
             logger.debug("Server started, entering main loop")
             yield
         finally:
+            if warm_up is not None:
+                warm_up.cancel()
             await notifier.close()
             try:
                 controller.stop()

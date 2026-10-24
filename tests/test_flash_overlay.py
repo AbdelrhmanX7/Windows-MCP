@@ -19,6 +19,7 @@ import windows_mcp.desktop.flash_overlay as flash_overlay
 @pytest.fixture(autouse=True)
 def _reset_active_overlay():
     """Each test starts and ends with no overlay registered."""
+    flash_overlay._glow_cache.clear()
     with flash_overlay._lock:
         flash_overlay._active_overlay = None
         flash_overlay._all_overlays.clear()
@@ -28,6 +29,7 @@ def _reset_active_overlay():
         flash_overlay._active_overlay = None
         all_overlays = tuple(flash_overlay._all_overlays)
         flash_overlay._all_overlays.clear()
+    flash_overlay._glow_cache.clear()
     if ov is not None:
         ov.stop_event.set()
     for pending in all_overlays:
@@ -139,7 +141,9 @@ class TestShowCaptureFlash:
         )
         monkeypatch.setattr(flash_overlay, "_premultiplied_bgra", lambda image, intensity: b"")
         monkeypatch.setattr(
-            flash_overlay, "_push_bitmap", lambda *args: calls.setdefault("pushed", args)
+            flash_overlay,
+            "_push_bitmap",
+            lambda *args, **kwargs: calls.setdefault("pushed", args),
         )
         monkeypatch.setattr(flash_overlay, "_pump_messages", lambda hwnd: None)
         monkeypatch.setattr(flash_overlay._user32, "DestroyWindow", lambda hwnd: None)

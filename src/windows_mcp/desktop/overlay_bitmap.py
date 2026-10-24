@@ -6,6 +6,11 @@ from PIL import Image
 def premultiplied_bgra(rgba_image: Image.Image, intensity: float) -> bytes:
     """Convert a PIL RGBA image to scaled, premultiplied BGRA bytes.
 
+    The arithmetic is integer and floors, exactly like the per-pixel definition
+    ``a' = a * int(intensity * 255) // 255`` and ``c' = c * a' // 255`` (fully transparent
+    pixels get zero colour), but it runs vectorised: a full-screen 1920x1080 bitmap takes
+    milliseconds instead of the ~0.5 s a Python loop spends holding the GIL.
+
     Args:
         rgba_image: Source RGBA bitmap.
         intensity: Opacity multiplier for the layered window.
@@ -13,29 +18,16 @@ def premultiplied_bgra(rgba_image: Image.Image, intensity: float) -> bytes:
     Returns:
         Premultiplied BGRA pixels in row-major order.
     """
-    bgra = bytearray(rgba_image.tobytes("raw", "BGRA"))
-    if intensity >= 1.0:
-        for i in range(0, len(bgra), 4):
-            a = bgra[i + 3]
-            if a == 0:
-                # Fully transparent layered pixels must have zero RGB too.
-                bgra[i] = 0
-                bgra[i + 1] = 0
-                bgra[i + 2] = 0
-                continue
-            bgra[i] = (bgra[i] * a) // 255
-            bgra[i + 1] = (bgra[i + 1] * a) // 255
-            bgra[i + 2] = (bgra[i + 2] * a) // 255
-    else:
-        for i in range(0, len(bgra), 4):
-            a = (bgra[i + 3] * int(intensity * 255)) // 255
-            bgra[i + 3] = a
-            if a == 0:
-                bgra[i] = 0
-                bgra[i + 1] = 0
-                bgra[i + 2] = 0
-                continue
-            bgra[i] = (bgra[i] * a) // 255
-            bgra[i + 1] = (bgra[i + 1] * a) // 255
-            bgra[i + 2] = (bgra[i + 2] * a) // 255
-    return bytes(bgra)
+    import numpy
+
+    raw = rgba_image.tobytes("raw", "BGRA")
+    if not raw:
+        return b""
+    pixels = numpy.frombuffer(raw, dtype=numpy.uint8).reshape(-1, 4).astype(numpy.uint16)
+    alpha = pixels[:, 3]
+    if intensity < 1.0:
+        alpha = alpha * int(intensity * 255) // 255
+    out = numpy.empty(pixels.shape, dtype=numpy.uint8)
+    out[:, :3] = pixels[:, :3] * alpha[:, None] // 255
+    out[:, 3] = alpha
+    return out.tobytes()

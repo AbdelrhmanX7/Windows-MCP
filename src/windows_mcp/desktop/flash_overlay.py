@@ -48,6 +48,12 @@ class _Overlay:
         self.thread: threading.Thread | None = None
 
 
+def has_active_flash() -> bool:
+    """Return whether a flash window is showing or still winding down."""
+    with _lock:
+        return _active_overlay is not None or bool(_all_overlays)
+
+
 def cancel_active_flash(timeout: float = 0.25) -> bool:
     """Stop every pending flash and report whether all windows have closed.
 
@@ -346,6 +352,43 @@ def _render_glow_rgba(
     return Image.alpha_composite(blurred, sharp)
 
 
+_GLOW_CACHE_SIZE = 4
+_glow_cache: "dict[tuple[int, int, tuple[tuple[int, int, int, int], ...]], bytes]" = {}
+_glow_cache_lock = threading.Lock()
+
+
+def _glow_bitmap(
+    width: int, height: int, local_rects: tuple[tuple[int, int, int, int], ...]
+) -> bytes:
+    """Return the premultiplied BGRA glow for this layout, rendering it only once.
+
+    Blurring and premultiplying a full-screen layer costs ~100 ms or more and the
+    flash geometry rarely changes between captures, so the bytes are kept in a small
+    cache. The fade is driven by the layered window's constant alpha, so one bitmap
+    serves every frame.
+
+    Args:
+        width: Overlay window width in pixels.
+        height: Overlay window height in pixels.
+        local_rects: Glow rects in window-local coordinates.
+
+    Returns:
+        Premultiplied BGRA bytes for ``_push_bitmap``.
+    """
+    key = (width, height, local_rects)
+    with _glow_cache_lock:
+        cached = _glow_cache.get(key)
+    if cached is not None:
+        return cached
+    glow_rgba = _render_glow_rgba(width, height, list(local_rects), outward=False)
+    bgra = _premultiplied_bgra(glow_rgba, 1.0)
+    with _glow_cache_lock:
+        if len(_glow_cache) >= _GLOW_CACHE_SIZE:
+            _glow_cache.pop(next(iter(_glow_cache)))
+        _glow_cache[key] = bgra
+    return bgra
+
+
 # ---------------------------------------------------------------------------
 # Window management
 # ---------------------------------------------------------------------------
@@ -539,7 +582,11 @@ def _run_overlay(
             _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE | _SWP_SHOWWINDOW,
         )
 
-        glow_rgba = _render_glow_rgba(width, height, local_rects, outward=False)
+        if overlay.stop_event.is_set():
+            return
+        glow_bgra = _glow_bitmap(width, height, tuple(local_rects))
+        if overlay.stop_event.is_set():
+            return
 
         logger.info(
             "screenshot flash overlay started: %dx%d layered window at (%d,%d) for %d rect(s)",
@@ -559,14 +606,12 @@ def _run_overlay(
             intensity = _intensity_at(elapsed_ms / _DURATION_MS, full_screen)
             intensity_q = round(intensity * _INTENSITY_QUANT)
             if intensity_q != last_intensity_q:
-                if intensity < _MIN_VISIBLE_INTENSITY:
-                    bgra = b"\x00" * (width * height * 4)
-                else:
-                    bgra = _premultiplied_bgra(glow_rgba, intensity)
-                _push_bitmap(hwnd, union_left, union_top, width, height, bgra)
+                opacity = 0 if intensity < _MIN_VISIBLE_INTENSITY else round(intensity * 255)
+                _push_bitmap(hwnd, union_left, union_top, width, height, glow_bgra, opacity=opacity)
                 last_intensity_q = intensity_q
             _pump_messages(hwnd)
-            time.sleep(_FRAME_INTERVAL_MS / 1000)
+            # Wake immediately when a capture cancels the flash.
+            overlay.stop_event.wait(_FRAME_INTERVAL_MS / 1000)
     except Exception:
         logger.debug("screenshot flash overlay failed", exc_info=True)
     finally:
