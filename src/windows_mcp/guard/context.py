@@ -24,6 +24,7 @@ TREE_SCOPE_SUBTREE = 7
 UIA_EDIT = 50004
 UIA_COMBOBOX = 50003
 UIA_DOCUMENT = 50030
+UIA_TEXT = 50020
 PROP_NAME = 30005
 PROP_CONTROL_TYPE = 30003
 PROP_CLASS_NAME = 30012
@@ -154,6 +155,7 @@ class Prober:
         self._recipient_cond = None
         self._document_cond = None
         self._lock = threading.Lock()
+        self.text_via: str | None = None
 
     # ------------------------------------------------------------------ conditions
     def _or(self, conds: list) -> Any:
@@ -295,17 +297,37 @@ class Prober:
             return None
         try:
             mod = self.mod or _iface_module()
-            pattern = doc.GetCurrentPatternAs(PATTERN_TEXT, mod.IUIAutomationTextPattern._iid_)
-            if not pattern:
-                return None
-            pattern = pattern.QueryInterface(mod.IUIAutomationTextPattern)
-            text = pattern.DocumentRange.GetText(limit)
-            return text or None
+            raw = doc.GetCurrentPattern(PATTERN_TEXT)
+            if raw:
+                pattern = raw.QueryInterface(mod.IUIAutomationTextPattern)
+                text = pattern.DocumentRange.GetText(limit)
+                if text and len(text.strip()) > 40:
+                    self.text_via = "textpattern"
+                    return text
+        except Exception as exc:
+            logger.debug("guard: TextPattern read failed: %s", exc)
+        # Fallback: names of the text nodes under the document (bounded).
+        try:
+            cond = self.client.CreatePropertyCondition(PROP_CONTROL_TYPE, UIA_TEXT)
+            nodes = doc.FindAll(TREE_SCOPE_DESCENDANTS, cond)
+            parts, total = [], 0
+            for i in range(min(nodes.Length if nodes else 0, 300)):
+                name = nodes.GetElement(i).CurrentName or ""
+                if name:
+                    parts.append(name)
+                    total += len(name) + 1
+                    if total >= limit:
+                        break
+            if parts:
+                self.text_via = "text-nodes"
+                return " ".join(parts)[:limit]
+        except Exception as exc:
+            logger.debug("guard: text-node read failed: %s", exc)
+        try:
+            self.text_via = "document-name"
+            return (doc.CurrentName or "")[:limit] or None
         except Exception:
-            try:
-                return (doc.CurrentName or "")[:limit] or None
-            except Exception:
-                return None
+            return None
 
     # ------------------------------------------------------------------ full probe
     def probe(
@@ -381,6 +403,7 @@ class Prober:
                 except Exception as exc:
                     logger.debug("guard: page text read failed: %s", exc)
                 timings["text"] = (time.perf_counter() - t) * 1000
+                ctx["text_via"] = self.text_via
         ctx["ts"] = time.time()
         ctx["probe_ms"] = round((time.perf_counter() - start) * 1000, 2)
         ctx["timings_ms"] = {k: round(v, 2) for k, v in timings.items()}

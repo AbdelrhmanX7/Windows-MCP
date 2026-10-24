@@ -78,7 +78,9 @@ def _context_payload(ctx: dict, result: dict | Any, *, cached: bool, ms: float) 
         "page_text_chars": len(page_text) if page_text else 0,
         "guard": verdict.to_dict() if verdict else None,
         "cached": cached,
+        "page_text_via": ctx.get("text_via"),
         "probe_ms": ctx.get("probe_ms"),
+        "probe_timings_ms": ctx.get("timings_ms"),
         "ms": round(ms, 2),
     }
 
