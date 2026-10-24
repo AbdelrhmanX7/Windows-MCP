@@ -162,6 +162,14 @@
     {
       "name": "Registry",
       "description": "Accesses the Windows Registry. Use mode=\"get\" to read a value, mode=\"set\" to create/update a value, mode=\"delete\" to remove a value or key, mode=\"list\" to list values and sub-keys under a path."
+    },
+    {
+      "name": "Apps",
+      "description": "Installed-app inventory merged from the Start menu, AppX packages, uninstall registry keys and URL protocol handlers. mode='list' prints one compact line per app with its skill (if any), URI schemes and process; supports a fuzzy query and limit. mode='info' returns the full record (aliases, AUMID, exe, process names, publisher, version, URI schemes) plus a skill summary. mode='refresh' rebuilds the cached inventory and reloads skills."
+    },
+    {
+      "name": "AppSkill",
+      "description": "Returns the markdown skill for an app: launch commands and URI deep links, keyboard shortcuts, recipes using these tools, and UI quirks. Resolves by skill name, app name, alias or process name with precedence builtin > user > generated. generate=true builds a skill from the app's menus and accessibility tree when none exists; regenerate=true rebuilds a generated one. Never overwrites builtin or user skills."
     }
   ],
   "compatibility": {

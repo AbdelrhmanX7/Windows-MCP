@@ -2,6 +2,7 @@
 
 from windows_mcp.tools import (
     app,
+    apps,
     clipboard,
     control_status,
     display,
@@ -30,6 +31,7 @@ _MODULES = [
     process,
     notification,
     registry,
+    apps,
 ]
 
 

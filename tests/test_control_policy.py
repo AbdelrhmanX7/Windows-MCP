@@ -21,7 +21,7 @@ from windows_mcp.tools.control_policy import CLASSIFIED_TOOLS, MODES, requires_c
         (name, {}, "direct")
         for name in ("Click", "Type", "Scroll", "Move", "Shortcut", "MultiSelect", "MultiEdit")
     ]
-    + [(name, {}, "possible") for name in ("PowerShell", "Notification")]
+    + [(name, {}, "possible") for name in ("PowerShell", "Notification", "AppSkill")]
     + [
         (name, {}, "other")
         for name in (
@@ -33,6 +33,7 @@ from windows_mcp.tools.control_policy import CLASSIFIED_TOOLS, MODES, requires_c
             "Wait",
             "WaitFor",
             "DisplayInventory",
+            "Apps",
         )
     ]
     + [
