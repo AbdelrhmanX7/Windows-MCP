@@ -514,6 +514,10 @@ def _run_server(
         # durable session to which a later ownership event can be pushed.
         _control_notifier.ttl = float("inf") if transport == "stdio" else 60.0
         _control_notifier.push_enabled = not (transport == "streamable-http" and stateless_http)
+    from windows_mcp.tasks.runtime import get_runtime
+
+    # Task events follow the same session lifetime rules as control notifications.
+    get_runtime().bus.configure_transport(transport, stateless_http=stateless_http)
     if explicit_tools or exclude_tools:
         _apply_tool_filter(mcp, explicit_tools, exclude_tools)
     match transport:

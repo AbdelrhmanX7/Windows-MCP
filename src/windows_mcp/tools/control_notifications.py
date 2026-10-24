@@ -177,6 +177,20 @@ class ControlToolGate(Middleware):
             )
         )
 
+    def _reject_user_state(self) -> None:
+        from windows_mcp.desktop.control import ControlBlocked
+
+        status = self.controller.status()
+        if status["state"] not in ("ready", "ai"):
+            raise self._blocked(
+                ControlBlocked(
+                    {"user": "USER_CONTROL", "takeover_pending": "TAKEOVER_PENDING"}.get(
+                        status["state"], "CONTROL_UNAVAILABLE"
+                    ),
+                    status,
+                )
+            )
+
     async def _begin_call(self, name: str) -> int:
         """Wait for the visible lease off-loop, retaining ownership on cancel."""
         worker = asyncio.create_task(asyncio.to_thread(self.controller.begin_call, name))
@@ -204,15 +218,26 @@ class ControlToolGate(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next: Callable) -> Any:
         self.notifier.remember(context)
         name = context.message.name
-        if name == "ControlStatus":
+        from windows_mcp.tools.control_policy import GATE_EXEMPT, requires_control
+
+        if name in GATE_EXEMPT:
+            # Tasks/ControlStatus never touch the desktop. RunParallel must not hold the
+            # gate lock (its inner calls re-enter this gate one by one), but it fails fast
+            # when the user holds control and something it would run needs ownership.
+            if (
+                name == "RunParallel"
+                and self.controller.enabled
+                and requires_control(
+                    self.controller.policy, name, getattr(context.message, "arguments", None)
+                )
+            ):
+                self._reject_user_state()
             return await call_next(context)
         if not self.controller.enabled:
             # Explicit opt-out only: a failed enabled controller still fails closed.
             # Keep shared desktop operations serialized, without creating a lease.
             async with self._call_lock:
                 return await call_next(context)
-        from windows_mcp.tools.control_policy import requires_control
-
         if not requires_control(
             self.controller.policy, name, getattr(context.message, "arguments", None)
         ):
@@ -221,20 +246,7 @@ class ControlToolGate(Middleware):
             return await call_next(context)
         # Waiting behind an already running external command must not hide a
         # user takeover. Poll ownership while waiting, then recheck under lock.
-        from windows_mcp.desktop.control import ControlBlocked
-
-        def reject_user_state() -> None:
-            status = self.controller.status()
-            if status["state"] not in ("ready", "ai"):
-                raise self._blocked(
-                    ControlBlocked(
-                        {"user": "USER_CONTROL", "takeover_pending": "TAKEOVER_PENDING"}.get(
-                            status["state"], "CONTROL_UNAVAILABLE"
-                        ),
-                        status,
-                    )
-                )
-
+        reject_user_state = self._reject_user_state
         reject_user_state()
         while True:
             try:
