@@ -4,12 +4,15 @@ from unittest.mock import MagicMock
 
 import pytest
 from windows_mcp.desktop.views import Size
-from windows_mcp.tree.budget import TreeElementBudget
+from windows_mcp.tree.budget import WINDOW_CUT_TIME, TreeElementBudget
 from windows_mcp.tree.config import THREAD_MAX_RETRIES
 from windows_mcp.tree.service import (
     Tree,
     _excluded_process_names,
+    _host_process_ids,
     _is_comtypes_variant_ord_typeerror,
+    _skip_host_processes_enabled,
+    _window_process_id,
     _window_process_name,
 )
 from windows_mcp.tree.views import BoundingBox, SemanticNode
@@ -540,6 +543,9 @@ def _traversal_recorder(
     # duration of the fixture — swap in a plain, still-alive mock before touching it.
     tree_instance.desktop = live_desktop
 
+    # Keep the real host-process chain of the test runner out of these tests.
+    monkeypatch.setattr("windows_mcp.tree.service._host_process_ids", lambda: frozenset())
+
     if excluded is None:
         monkeypatch.delenv("WINDOWS_MCP_EXCLUDE_PROCESSES", raising=False)
     else:
@@ -787,3 +793,235 @@ class TestProcessExclusion:
 
         assert traversed == [200]
         assert tree_instance.element_budget.count == 1
+
+
+class _FakeParent:
+    """Stand-in for a psutil parent process."""
+
+    def __init__(self, pid: int, name: str) -> None:
+        self.pid = pid
+        self._name = name
+
+    def name(self) -> str:
+        return self._name
+
+
+class TestHostProcessIds:
+    """The MCP host's process chain, read from psutil without UI Automation (#383)."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        _host_process_ids.cache_clear()
+        yield
+        _host_process_ids.cache_clear()
+
+    def _patch_parents(self, monkeypatch, parents):
+        process = MagicMock()
+        process.parents.return_value = parents
+        monkeypatch.setattr("windows_mcp.tree.service.Process", lambda pid: process)
+
+    def test_collects_ancestors_up_to_the_shell(self, monkeypatch):
+        self._patch_parents(
+            monkeypatch,
+            [
+                _FakeParent(10, "uv.exe"),
+                _FakeParent(20, "Code.exe"),
+                _FakeParent(30, "explorer.exe"),
+                _FakeParent(40, "svchost.exe"),
+            ],
+        )
+
+        assert _host_process_ids() == frozenset({10, 20})
+
+    def test_never_includes_explorer_or_system_processes(self, monkeypatch):
+        self._patch_parents(
+            monkeypatch,
+            [_FakeParent(30, "EXPLORER.EXE"), _FakeParent(20, "Code.exe")],
+        )
+
+        assert _host_process_ids() == frozenset()
+
+    def test_unreadable_chain_yields_no_host(self, monkeypatch):
+        def explode(pid):
+            raise RuntimeError("access denied")
+
+        monkeypatch.setattr("windows_mcp.tree.service.Process", explode)
+
+        assert _host_process_ids() == frozenset()
+
+    def test_unreadable_parent_name_stops_the_walk(self, monkeypatch):
+        broken = MagicMock(pid=20)
+        broken.name.side_effect = RuntimeError("gone")
+        self._patch_parents(monkeypatch, [_FakeParent(10, "uv.exe"), broken])
+
+        assert _host_process_ids() == frozenset({10})
+
+
+class TestSkipHostProcessesEnabled:
+    def test_on_by_default(self):
+        assert _skip_host_processes_enabled({}) is True
+
+    def test_explicit_off_values_disable(self):
+        for raw in ("0", "false", "No", " OFF "):
+            assert _skip_host_processes_enabled({"WINDOWS_MCP_SKIP_HOST_PROCESSES": raw}) is False
+
+    def test_other_values_keep_it_on(self):
+        assert _skip_host_processes_enabled({"WINDOWS_MCP_SKIP_HOST_PROCESSES": "1"}) is True
+
+
+class TestWindowProcessId:
+    def test_returns_the_owning_pid(self, monkeypatch):
+        monkeypatch.setattr(
+            "windows_mcp.tree.service.win32process.GetWindowThreadProcessId",
+            lambda handle: (1, 4242),
+        )
+        assert _window_process_id(100) == 4242
+
+    def test_zero_pid_is_none(self, monkeypatch):
+        monkeypatch.setattr(
+            "windows_mcp.tree.service.win32process.GetWindowThreadProcessId",
+            lambda handle: (0, 0),
+        )
+        assert _window_process_id(100) is None
+
+    def test_lookup_failure_is_none(self, monkeypatch):
+        def explode(handle):
+            raise OSError("invalid window handle")
+
+        monkeypatch.setattr(
+            "windows_mcp.tree.service.win32process.GetWindowThreadProcessId", explode
+        )
+        assert _window_process_id(100) is None
+
+
+class TestHostProcessSkip:
+    """Windows of the MCP host (e.g. VS Code) are never entered by default (#383)."""
+
+    def _wire(self, tree_instance, monkeypatch, host_pids, window_pids):
+        recorded = _traversal_recorder(tree_instance, monkeypatch, process_names={}, excluded=None)
+        monkeypatch.setattr("windows_mcp.tree.service._host_process_ids", lambda: host_pids)
+        monkeypatch.setattr(
+            "windows_mcp.tree.service._window_process_id", lambda handle: window_pids.get(handle)
+        )
+        return recorded
+
+    def test_host_window_is_skipped_before_uia(self, tree_instance, monkeypatch):
+        monkeypatch.delenv("WINDOWS_MCP_SKIP_HOST_PROCESSES", raising=False)
+        recorded = self._wire(tree_instance, monkeypatch, frozenset({42}), {100: 42, 200: 7})
+
+        _, _, _, failed_handles, _ = tree_instance.get_window_wise_nodes(
+            windows_handles=[100, 200], active_window_flag=False
+        )
+
+        assert recorded.uia_attempts == [200]
+        assert recorded.traversed == [200]
+        assert failed_handles == []
+
+    def test_opt_out_traverses_host_windows(self, tree_instance, monkeypatch):
+        monkeypatch.setenv("WINDOWS_MCP_SKIP_HOST_PROCESSES", "false")
+        recorded = self._wire(tree_instance, monkeypatch, frozenset({42}), {100: 42, 200: 7})
+
+        tree_instance.get_window_wise_nodes(windows_handles=[100, 200], active_window_flag=False)
+
+        assert recorded.traversed == [100, 200]
+
+    def test_unresolvable_window_owner_is_traversed(self, tree_instance, monkeypatch):
+        monkeypatch.delenv("WINDOWS_MCP_SKIP_HOST_PROCESSES", raising=False)
+        recorded = self._wire(tree_instance, monkeypatch, frozenset({42}), {})
+
+        tree_instance.get_window_wise_nodes(windows_handles=[100], active_window_flag=False)
+
+        assert recorded.traversed == [100]
+
+
+class _SteppingClock:
+    """A clock the test advances by hand."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestPerWindowBudget:
+    """One slow or enormous window must not use up the whole capture (#383)."""
+
+    def test_time_budget_stops_a_slow_window_and_keeps_its_partial_nodes(
+        self, tree_instance, monkeypatch
+    ):
+        clock = _SteppingClock()
+        parent = _make_pane_parent()
+        children = [_make_button_child(f"btn{i}", 10 * i) for i in range(5)]
+
+        def slow_get_children(node, cache_request):
+            if node is parent:
+                return children
+            # Each child's subtree takes 3 s, as a sluggish provider would.
+            clock.now += 3.0
+            return []
+
+        monkeypatch.setattr(
+            "windows_mcp.tree.service.CachedControlHelper.get_cached_children",
+            slow_get_children,
+        )
+        monkeypatch.setattr("windows_mcp.tree.service.AccessibleRoleNames", {43: "PushButton"})
+
+        tree_instance.element_budget = TreeElementBudget(limit=100, clock=clock)
+        tree_instance.element_budget.begin_window(max_seconds=5.0)
+
+        interactive_nodes = []
+        tree_instance.tree_traversal(
+            parent, Rect(0, 0, 500, 500), "Window", False, interactive_nodes, [], [], []
+        )
+
+        # Children 1 and 2 fit in the budget (t=3, t=6 >= 5 stops the loop).
+        assert len(interactive_nodes) == 2
+        assert tree_instance.element_budget.end_window() == WINDOW_CUT_TIME
+        # A per-window cut is not the capture-wide truncation the output note reports.
+        assert tree_instance.element_budget.truncated is False
+
+    def test_window_cap_does_not_skip_later_windows(self, tree_instance, monkeypatch):
+        live_desktop = MagicMock()
+        live_desktop.is_window_browser.return_value = False
+        tree_instance.desktop = live_desktop
+        monkeypatch.delenv("WINDOWS_MCP_EXCLUDE_PROCESSES", raising=False)
+        monkeypatch.setattr("windows_mcp.tree.service._host_process_ids", lambda: frozenset())
+
+        parents = {111: _make_pane_parent(), 222: _make_pane_parent()}
+        for parent in parents.values():
+            parent.Name = "Some Window"
+            parent.ClassName = "SomeWindow"
+            parent.BoundingRectangle = Rect(0, 0, 500, 500)
+        children = {
+            id(parent): [_make_button_child(f"{handle}-btn{i}", 10 * i) for i in range(5)]
+            for handle, parent in parents.items()
+        }
+
+        monkeypatch.setattr(
+            "windows_mcp.tree.service.ControlFromHandle", lambda handle: parents[handle]
+        )
+        monkeypatch.setattr(
+            "windows_mcp.tree.service.CacheRequestFactory.create_tree_traversal_cache",
+            lambda: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "windows_mcp.tree.service.CachedControlHelper.get_cached_children",
+            lambda node, cache_request: children.get(id(node), []),
+        )
+        monkeypatch.setattr("windows_mcp.tree.service.AccessibleRoleNames", {43: "PushButton"})
+
+        tree_instance.element_budget = TreeElementBudget(limit=100)
+        tree_instance.max_window_elements = 2
+        tree_instance.window_time_budget = None
+
+        interactive_nodes, _, _, failed_handles, _ = tree_instance.get_window_wise_nodes(
+            windows_handles=[111, 222], active_window_flag=False
+        )
+
+        names = [node.name for node in interactive_nodes]
+        assert len([name for name in names if name.startswith("111-")]) == 2
+        assert len([name for name in names if name.startswith("222-")]) == 2
+        assert failed_handles == []
+        assert tree_instance.element_budget.count == 4
+        assert tree_instance.element_budget.truncated is False
