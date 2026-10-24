@@ -131,7 +131,7 @@ def test_scam_guard_refusal_ends_the_run_for_the_caller_to_ask():
         tools=tools,
     )
     assert summary["status"] == "blocked" and "SCAM_GUARD_CONFIRM_REQUIRED" in summary["answer"]
-    assert [c[0] for c in tools.calls] == ["Type"]  # no second try around the guard
+    assert [c[0] for c in tools.calls] == ["Snapshot", "Type"]  # no second try around the guard
 
 
 def test_inner_calls_cannot_pass_confirmed():
