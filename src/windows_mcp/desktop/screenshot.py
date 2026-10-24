@@ -354,15 +354,20 @@ def capture(
         chain = [cls]
 
     # Try each candidate: skip unavailable ones, catch failures and fall through.
+    # Any exception is caught -- the chain exists so that one backend misbehaving
+    # on unusual hardware degrades to a working one, and third-party backends
+    # (dxcam in particular) raise well outside the usual OSError family (#417).
+    failures: list[tuple[str, BaseException]] = []
     for backend_cls in chain:
         if backend_cls.name in _degraded_backends:
             continue
         inst = _get_backend(backend_cls.name)
-        if not inst.is_available(capture_rect):
-            continue
         try:
+            if not inst.is_available(capture_rect):
+                continue
             image = inst.capture(capture_rect)
-        except (OSError, RuntimeError, ValueError, IndexError, COMError):
+        except Exception as exc:
+            failures.append((inst.name, exc))
             logger.warning(
                 "Screenshot backend '%s' failed; trying next backend",
                 inst.name,
@@ -385,4 +390,9 @@ def capture(
         return image, inst.name
 
     # All candidates exhausted — pillow is always present as the last resort.
-    return _get_backend("pillow").capture(capture_rect), "pillow"
+    try:
+        return _get_backend("pillow").capture(capture_rect), "pillow"
+    except Exception as exc:
+        failures.append(("pillow", exc))
+        summary = "; ".join(f"{name}: {type(err).__name__}: {err}" for name, err in failures)
+        raise RuntimeError(f"All screenshot backends failed ({summary})") from exc
