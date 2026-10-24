@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
+from pathlib import Path
 
 from fastmcp.utilities.types import Image
 from textwrap import dedent
@@ -19,6 +21,14 @@ from windows_mcp.desktop.utils import remove_private_use_chars, repair_surrogate
 logger = logging.getLogger(__name__)
 
 MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT = 1920, 1080
+
+SAVE_FORMATS = {
+    ".png": "PNG",
+    ".jpg": "JPEG",
+    ".jpeg": "JPEG",
+    ".bmp": "BMP",
+    ".webp": "WEBP",
+}
 
 
 def _screenshot_scale() -> float:
@@ -49,6 +59,65 @@ def _as_region(value: list | str | None) -> list | None:
     return json.loads(value)
 
 
+def resolve_save_path(save_path: str | None) -> tuple[Path, str] | None:
+    """Validate a ``save_path`` argument and resolve the file the image will be written to.
+
+    Args:
+        save_path: Absolute path to an image file (``.png``, ``.jpg``/``.jpeg``, ``.bmp`` or
+            ``.webp``), or to a directory. A directory is recognized when it already exists or
+            the path ends with a path separator; a timestamped ``screenshot-*.png`` name is then
+            generated inside it. Missing parent directories are created.
+
+    Returns:
+        ``(file_path, pil_format)``, or ``None`` when ``save_path`` is empty.
+
+    Raises:
+        ValueError: If the path is relative or has an unsupported extension.
+    """
+    if save_path is None or not str(save_path).strip():
+        return None
+    raw = str(save_path).strip()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"save_path must be an absolute path, got {raw!r}")
+
+    if raw.endswith(("/", "\\")) or path.is_dir():
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        path = path / f"screenshot-{stamp}.png"
+
+    image_format = SAVE_FORMATS.get(path.suffix.lower())
+    if image_format is None:
+        supported = ", ".join(SAVE_FORMATS)
+        raise ValueError(
+            f"save_path has unsupported extension {path.suffix or '(none)'!r}; "
+            f"use one of {supported}, or pass a directory"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path.resolve(), image_format
+
+
+def save_screenshot(image, target: tuple[Path, str], png_bytes: bytes | None = None) -> str:
+    """Write a captured screenshot to disk and return the absolute path written.
+
+    Args:
+        image: The PIL image to save (the same pixels returned inline).
+        target: ``(file_path, pil_format)`` as returned by ``resolve_save_path``.
+        png_bytes: Already-encoded PNG data for ``image``; reused for ``.png`` targets so the
+            image is not encoded twice.
+
+    Returns:
+        The absolute file path as a string.
+    """
+    path, image_format = target
+    if image_format == "PNG" and png_bytes:
+        path.write_bytes(png_bytes)
+        return str(path)
+    if image_format == "JPEG" and image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+    image.save(path, format=image_format)
+    return str(path)
+
+
 def capture_desktop_state(
     desktop: Desktop,
     *,
@@ -61,6 +130,7 @@ def capture_desktop_state(
     display: list[int] | None,
     region: list[int] | None,
     tool_name: str,
+    save_path: str | None = None,
 ):
     profile_enabled = _snapshot_profile_enabled()
     profile_started_at = time.perf_counter()
@@ -71,6 +141,10 @@ def capture_desktop_state(
 
     if use_dom and not use_ui_tree:
         raise ValueError("use_dom=True requires use_ui_tree=True")
+
+    save_target = resolve_save_path(save_path)
+    if save_target is not None and not use_vision:
+        raise ValueError("save_path requires use_vision=True")
 
     display_indices = Desktop.parse_display_selection(display)
 
@@ -127,6 +201,12 @@ def capture_desktop_state(
             display,
         )
 
+    saved_path = None
+    if save_target is not None:
+        if desktop_state.screenshot is None:
+            raise ValueError("No screenshot was captured, so nothing could be saved to save_path")
+        saved_path = save_screenshot(desktop_state.screenshot, save_target, screenshot_bytes)
+
     return {
         "desktop_state": desktop_state,
         "interactive_elements": interactive_elements,
@@ -137,6 +217,7 @@ def capture_desktop_state(
         "active_desktop": active_desktop,
         "all_desktops": all_desktops,
         "screenshot_bytes": screenshot_bytes,
+        "saved_path": saved_path,
     }
 
 
@@ -210,6 +291,9 @@ def build_snapshot_response(
         metadata_text += "Coordinate Space: Virtual desktop coordinates\n"
     if desktop_state.screenshot_backend:
         metadata_text += f"Screenshot Backend: {desktop_state.screenshot_backend}\n"
+    saved_path = capture_result.get("saved_path")
+    if saved_path:
+        metadata_text += f"Screenshot Saved To: {saved_path}\n"
     if ui_detail_note:
         metadata_text += f"{ui_detail_note}\n"
 
