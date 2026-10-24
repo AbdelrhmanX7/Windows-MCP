@@ -221,11 +221,11 @@ class ControlToolGate(Middleware):
         from windows_mcp.tools.control_policy import GATE_EXEMPT, requires_control
 
         if name in GATE_EXEMPT:
-            # Tasks/ControlStatus never touch the desktop. RunParallel must not hold the
-            # gate lock (its inner calls re-enter this gate one by one), but it fails fast
-            # when the user holds control and something it would run needs ownership.
+            # Tasks/ControlStatus never touch the desktop. RunParallel and Do must not hold
+            # the gate lock (their inner calls re-enter this gate one by one), but they fail
+            # fast when the user holds control and something they would run needs ownership.
             if (
-                name == "RunParallel"
+                name in ("RunParallel", "Do")
                 and self.controller.enabled
                 and requires_control(
                     self.controller.policy, name, getattr(context.message, "arguments", None)

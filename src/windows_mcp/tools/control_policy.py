@@ -22,6 +22,7 @@ OTHER = frozenset(
         "DisplayInventory",
         "Locate",
         "Apps",
+        "Route",
     }
 )
 MODES = {
@@ -38,7 +39,10 @@ MODES = {
 # local in-memory state, and RunParallel is an orchestrator whose inner calls are each
 # gated (and screen-locked) individually. Gating the orchestrator itself would deadlock
 # its inner calls on the gate's non-reentrant lock.
-ORCHESTRATION = frozenset({"Tasks", "RunParallel"})
+# Do is an orchestrator too (its inner calls are gated one by one), but unlike RunParallel it
+# is itself a screen call: it holds the screen lock for its whole run so no other request's
+# input lands between its steps. Its inner calls re-enter that lock (see tasks/runtime.py).
+ORCHESTRATION = frozenset({"Tasks", "RunParallel", "Do"})
 GATE_EXEMPT = frozenset({"ControlStatus"}) | ORCHESTRATION
 CLASSIFIED_TOOLS = DIRECT | POSSIBLE | OTHER | MODES.keys() | GATE_EXEMPT
 
@@ -70,6 +74,8 @@ def category(name: str, arguments: dict | None = None) -> str:
     """Return direct, possible, other or none (gate-exempt) for one tool call."""
     if name in ("ControlStatus", "Tasks"):
         return "none"
+    if name == "Do":
+        return "direct"  # Drives the mouse/keyboard through whatever the inner model picks.
     if name == "RunParallel":
         # The strictest category of everything it would run.
         worst = "none"
@@ -96,8 +102,11 @@ def is_screen_call(name: str, arguments: dict | None = None) -> bool:
     """True for calls that drive the shared mouse/keyboard/focus and must never interleave.
 
     Policy-independent: these are the ``direct`` operations (unknown tools included).
-    RunParallel itself is not a screen call; its inner calls are checked one by one.
+    RunParallel itself is not a screen call; its inner calls are checked one by one. Do is:
+    it owns the screen for its whole run (its inner calls re-enter the lock).
     """
+    if name == "Do":
+        return True
     if name in GATE_EXEMPT:
         return False
     return category(name, arguments) == "direct"

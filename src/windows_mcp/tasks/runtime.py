@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import threading
@@ -78,6 +79,19 @@ class TaskRuntime:
         )
 
 
+# Set while a call holds the screen lock, in that call's context (and so in every inner
+# call it makes through mcp.call_tool from the same task). Lets Do's inner Click/Type run
+# under Do's own lock instead of deadlocking on it; other requests still queue behind it.
+_SCREEN_HELD: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "wmcp_screen_held", default=None
+)
+
+
+def screen_held_by() -> str | None:
+    """The outer call holding the screen lock in this context, if any."""
+    return _SCREEN_HELD.get()
+
+
 _runtime: TaskRuntime | None = None
 _runtime_lock = threading.Lock()
 
@@ -146,14 +160,22 @@ class OrchestrationMiddleware(Middleware):
         arguments = getattr(context.message, "arguments", None)
         if not is_screen_call(name, arguments):
             return await call_next(context)
+        if _SCREEN_HELD.get() is not None:
+            # An inner call of a screen-holding orchestrator (Do): already serialized.
+            return await call_next(context)
         lock = self.runtime.screen_lock
         try:
             await lock.acquire(name)
         except ScreenLockTimeout as exc:
             raise ToolError(str(exc)) from None
         # Hold the lock until the tool really finishes. A cancelled request must not release
-        # it while a worker thread is still typing or clicking.
-        work = asyncio.ensure_future(call_next(context))
+        # it while a worker thread is still typing or clicking. The task copies the current
+        # context at creation, so set the marker first.
+        marker = _SCREEN_HELD.set(name)
+        try:
+            work = asyncio.ensure_future(call_next(context))
+        finally:
+            _SCREEN_HELD.reset(marker)
         try:
             return await asyncio.shield(work)
         except asyncio.CancelledError:
