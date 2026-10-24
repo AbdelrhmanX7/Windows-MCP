@@ -6,7 +6,8 @@ omissions; unclassified extensions conservatively retain the desktop gate.
 
 # Categories describe desktop interference, not whether an operation is destructive.
 DIRECT = frozenset({"Click", "Type", "Scroll", "Move", "Shortcut", "MultiSelect", "MultiEdit"})
-POSSIBLE = frozenset({"PowerShell", "Notification"})
+# AppSkill is "possible": generate/regenerate may launch an app and read its window.
+POSSIBLE = frozenset({"PowerShell", "Notification", "AppSkill"})
 OTHER = frozenset(
     {
         "FileSystem",
@@ -18,6 +19,7 @@ OTHER = frozenset(
         "WaitFor",
         "DisplayInventory",
         "Locate",
+        "Apps",
     }
 )
 MODES = {

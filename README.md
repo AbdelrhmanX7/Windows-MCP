@@ -652,10 +652,10 @@ is still accepted for compatibility but no longer affects takeover.
 | Policy | Operations that require desktop ownership |
 |---|---|
 | `relaxed` (A, default) | Direct input: Click, Type, Scroll, Move, Shortcut, MultiSelect, MultiEdit; App `switch` and `resize`. |
-| `balanced` (B) | Everything in A, plus PowerShell, Notification, App `launch`/`launch_executable`, Process `kill`, and Clipboard `set`. |
+| `balanced` (B) | Everything in A, plus PowerShell, Notification, AppSkill, App `launch`/`launch_executable`, Process `kill`, and Clipboard `set`. |
 | `strict` (C) | All tools except ControlStatus, matching the previous gate behavior. |
 
-FileSystem, Registry, Snapshot, Screenshot, Scrape, Wait, WaitFor, DisplayInventory,
+FileSystem, Registry, Snapshot, Screenshot, Scrape, Wait, WaitFor, DisplayInventory, Apps,
 Process `list`, and Clipboard `get` bypass ownership in A and B. This classification
 concerns desktop interference, not permissions or data safety. PowerShell can still
 operate the UI, and file/registry operations can have other side effects.
@@ -796,6 +796,12 @@ sampling filters transient readings but cannot distinguish persistent query fail
 | `WINDOWS_MCP_RESOLVER_VISION_TIMEOUT` | `3.0` | Seconds allowed for one tier-2 request. On timeout, HTTP error or a "none" answer the resolver falls back to the tier-1 result and does not click. |
 
 **Privacy note:** tier 1 (accessibility) never leaves the machine. Tier 2 is the only part of the resolver that sends data off the machine: when `WINDOWS_MCP_RESOLVER_VISION` is set *and* accessibility matching is weak (or the window exposes almost no elements), it sends a downscaled JPEG of **the target window only**, with numbered boxes drawn on it, plus the target text, to the configured provider (`api.anthropic.com`). Having `ANTHROPIC_API_KEY` in the environment does not enable it. Leave the variable unset if window contents must not leave the machine.
+### Apps & skills
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_APPS_TTL` | `21600` (6 h) | Seconds the installed-app inventory (memory and `%LOCALAPPDATA%\windows-mcp\Cache\apps-inventory.json`) stays fresh before `Apps`/`AppSkill` rebuild it. `Apps(mode="refresh")` rebuilds it immediately. |
+| `WINDOWS_MCP_SKILLS_DIR` | `%LOCALAPPDATA%\windows-mcp\skills` | Folder for user and generated skills. Bundled skills always load from the package. |
 
 ### Telemetry
 
@@ -882,6 +888,38 @@ MCP Client can access the following tools to interact with Windows:
 - `Process`: List running processes or terminate them by PID or name.
 - `Notification`: Send a Windows toast notification with a title and message. Optional `app_id` (a registered AppUserModelID, e.g. `Microsoft.Windows.Explorer`) picks the app it appears under; it defaults to Windows PowerShell.
 - `Registry`: Read, write, delete, or list Windows Registry values and keys.
+- `Apps`: Installed-app inventory merged from Start-menu entries (AUMIDs), AppX packages, uninstall registry keys and URL protocol handlers. `mode="list"` prints one line per app (`name [id] | skill=<name>(source) | uri=<schemes> | proc=<process>`) with an optional fuzzy `query` and `limit`; `mode="info"` returns the full record plus a skill summary; `mode="refresh"` rebuilds the cached inventory and reloads skills.
+- `AppSkill`: Returns the markdown skill for an app (launch commands and URI deep links, keyboard shortcuts, recipes using these tools, UI quirks) by skill name, app name, alias or process. Precedence is builtin > user > generated. `generate=true` builds a skill from the app's menu bar (`&` access keys and `Tab` accelerators), ribbon KeyTips and a bounded UI Automation walk, launching the app if needed and closing it afterwards; `regenerate=true` rebuilds a generated skill. Builtin and user skills are never overwritten. Skills are also exposed as MCP resources at `skill://<name>` (and `skill://index`). When the foreground window's app has a skill, `Snapshot` adds one line pointing to it.
+
+### App skills
+
+A skill is a markdown file with a small YAML frontmatter, one file per app:
+
+```markdown
+---
+name: spotify
+title: Spotify
+description: Spotify music player; play, search, pause, skip and change volume.
+version: 1
+source: builtin            # builtin | user | generated
+match:
+  process: [spotify.exe]   # lowercase process names
+  aumid: ["SpotifyAB.SpotifyMusic_*", Spotify]   # fnmatch patterns
+  name: [Spotify, "Spotify *"]                   # window-title / display-name patterns
+  exe: [spotify.exe]
+uri_schemes: [spotify]     # without the trailing colon
+---
+
+# Spotify
+
+## What it's for
+## Launch and deep links
+## Keyboard shortcuts
+## Recipes
+## UI quirks and accessibility notes
+```
+
+Bundled skills live in `src/windows_mcp/skills/builtin/` (File Explorer, Settings, Edge, Chrome, Notepad, Calculator, Spotify, Word, Excel, PowerPoint, Outlook, Teams, VS Code, Discord, Windows Terminal/PowerShell, Paint, Snipping Tool, Task Manager). Drop your own `.md` files into the user skill folder (`WINDOWS_MCP_SKILLS_DIR`); generated skills are written there too, with `source: generated`. The frontmatter is a deliberately small YAML subset (scalars, inline or block lists, one nested `match` map), so other tools can index or write skills without a YAML library.
 
 
 ## 🤝 Connect with Us

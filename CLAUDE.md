@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 22 tools via FastMCP:
+Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 24 tools via FastMCP:
 
 | Group | Tools |
 |---|---|
@@ -12,6 +12,7 @@ Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM 
 | Input | `Click` (also `target=` in words), `Locate`, `Type`, `Scroll`, `Move` (also drag-and-drop via `drag=True`), `Shortcut`, `MultiSelect`, `MultiEdit` |
 | Timing | `Wait`, `WaitFor` |
 | System | `App`, `PowerShell`, `FileSystem`, `Registry`, `Process`, `Clipboard`, `Notification`, `ControlStatus` |
+| Apps | `Apps` (installed-app inventory: list/info/refresh), `AppSkill` (per-app skill markdown; `generate`/`regenerate`) |
 
 Tool names are defined by the `name=` argument of each `@mcp.tool(...)` in `src/windows_mcp/tools/`; that directory is the source of truth. Note the shell tool is registered as `PowerShell`, not `Shell`. Any subset can be removed at startup with `serve --exclude-tools` (e.g. `windows-mcp serve --exclude-tools PowerShell,Registry`).
 
@@ -50,6 +51,8 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 **Virtual Desktop Manager** — `vdm/core.py`: Tracks which windows belong to which Windows virtual desktop (Win10/11).
 
 **Domain services** — thin packages backing the system tools: `filesystem/` (read/write/copy/move/delete/list/search/info), `registry/` (get/set/delete/list, implemented via PowerShell cmdlets), `powershell/` (`PowerShellExecutor` plus environment resolution), `process/` (list/kill), `notifications/`. Registry and PowerShell tools shell out, so their latency is dominated by process startup.
+
+**Apps & skills** — `apps/`: installed-app inventory. `sources.py` reads Get-StartApps + AppsFolder + Get-AppxPackage in one PowerShell call and the uninstall keys / HKCR URL protocols with `winreg`; `service.py` merges them into `AppRecord`s (name, aliases, AUMID, exe, process names, publisher, version, URI schemes, sources) and caches them in memory and on disk with a TTL. `skills/`: markdown+frontmatter skills (`frontmatter.py` is a small YAML-subset parser, no PyYAML), `store.py` loads `skills/builtin/*.md` (package data) and the user folder with precedence builtin > user > generated, `generate.py` builds a `generated` skill from the Win32 menu bar, ribbon KeyTips and a bounded UIA walk. `tools/apps.py` exposes `Apps`/`AppSkill`, the `skill://` resources, and the one-line Snapshot hint (in-memory process/title lookup).
 
 **Infrastructure** — `infrastructure/`: cross-cutting concerns. `analytics.py` (optional PostHog telemetry, disabled with `ANONYMIZED_TELEMETRY=false`; records tool names and errors only, never arguments or outputs), `auth.py` and `oauth.py` (bearer-token and OAuth middleware for HTTP transports), `security.py` (SSRF validation, IP allowlist middleware), `config.py` (server configuration). Note `windows_mcp/config.py` at the package root is unrelated — it only holds the `WINDOWS_MCP_DEBUG` helpers.
 
@@ -93,6 +96,8 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `WINDOWS_MCP_RESOLVER_VISION` | _(off)_ | Set to `anthropic` (or `on`) to enable the tier-2 vision fallback, which sends a downscaled JPEG of the target window to the provider when accessibility matching is weak. An API key alone never enables it. Resolved in `resolver/config.py`. |
 | `WINDOWS_MCP_RESOLVER_MODEL` | `claude-haiku-5-5` | Vision model for tier 2. Key from `ANTHROPIC_API_KEY`. Resolved in `resolver/config.py`. |
 | `WINDOWS_MCP_RESOLVER_VISION_TIMEOUT` | `3.0` | Seconds allowed for the tier-2 request; on timeout or error the resolver degrades to tier-1 results. Resolved in `resolver/config.py`. |
+| `WINDOWS_MCP_APPS_TTL` | `21600` | Seconds the installed-app inventory cache (memory + platformdirs user cache `apps-inventory.json`) stays fresh. `Apps(mode="refresh")` forces a rebuild. Resolved in `apps/service.py`. |
+| `WINDOWS_MCP_SKILLS_DIR` | platformdirs user data dir `skills/` | Folder for user and generated skills. Resolved in `skills/store.py`. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(off)_ | Set to `1`/`true`/`yes`/`on` to suppress the orange-red glowing border that briefly appears after every screenshot. Resolved in `desktop/flash_overlay.py`. |
 
 ## Security Context
