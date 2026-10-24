@@ -572,30 +572,22 @@ class Desktop:
     ):
         match mode:
             case "launch":
+                before = self._top_level_windows()
                 response, status, pid = self.launch_app(name)
                 if status != 0:
                     return response
-
-                launched = False
-                if pid > 0:
-                    launched = self._wait_for_process_window(pid, timeout=10)
-
-                if not launched:
-                    # Fallback: Regex search for the window title (UWP apps, and
-                    # launchers that hand off to another process).
-                    safe_name = re.escape(name)
-                    # Top-level windows only: each probe is cheap enough to repeat
-                    # every 50 ms, and a nested element with the app's name cannot
-                    # pass for its window.
-                    window = uia.WindowControl(searchDepth=1, RegexName=f"(?i).*{safe_name}.*")
-                    if window.Exists(
-                        maxSearchSeconds=10, searchIntervalSeconds=self._WINDOW_POLL_S
-                    ):
-                        launched = True
-
-                if launched:
-                    return f"{name.title()} launched."
-                return f"Launching {name.title()} sent, but window not detected yet."
+                hwnd = self._wait_for_launched_window(name, pid, before, timeout=10)
+                if hwnd is None:
+                    return f"Launching {name.title()} sent, but window not detected yet."
+                if win32gui.GetForegroundWindow() != hwnd:
+                    # A process started through the PowerShell session may not be allowed
+                    # to take the foreground, which left the new window behind the desktop
+                    # and invisible to Snapshot. This process injects the input, so it can.
+                    try:
+                        self.bring_window_to_top(hwnd)
+                    except Exception:
+                        logger.debug("Could not focus launched window %s", hwnd, exc_info=True)
+                return f"{name.title()} launched."
             case "resize":
                 response, status = self.resize_app(name=name, size=size, loc=loc)
                 if status != 0:
@@ -611,47 +603,73 @@ class Desktop:
 
     _WINDOW_POLL_S = 0.05
 
-    def _wait_for_process_window(self, pid: int, timeout: float) -> bool:
-        """Poll until ``pid`` owns a visible top-level window.
+    # Zero-width characters some apps put in titles ("Microsoft\u200b Edge").
+    _INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
 
-        EnumWindows is a cheap user32 walk, so it can run every 50 ms and return
-        as soon as the window is mapped (UIA's Exists polled a tree search every
-        0.5 s).
+    @staticmethod
+    def _top_level_windows() -> set[int]:
+        """Handles of the visible, unowned top-level windows right now."""
+        handles: set[int] = set()
+
+        def callback(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd) and not win32gui.GetWindow(hwnd, win32con.GW_OWNER):
+                handles.add(hwnd)
+            return True
+
+        try:
+            win32gui.EnumWindows(callback, None)
+        except Exception:
+            pass
+        return handles
+
+    def _wait_for_launched_window(
+        self, name: str, pid: int, before: set[int], timeout: float
+    ) -> int | None:
+        """Poll every 50 ms for the window a launch produced.
+
+        A window counts when it is owned by ``pid``, by another process with the same
+        executable (launchers such as msedge.exe hand off to a second process), or when it
+        is new since ``before`` and its title contains ``name``. All three are checked on
+        every pass, so a hand-off no longer costs a full timeout before the title search.
 
         Args:
-            pid: Process id returned by Start-Process.
+            name: App name as given to App(mode="launch").
+            pid: Process id from Start-Process, or 0 when unknown.
+            before: Top-level windows that existed before the launch.
             timeout: Maximum seconds to wait.
 
         Returns:
-            True when a window appeared in time.
+            The window handle, or None when nothing appeared in time.
         """
-
-        def has_window() -> bool:
-            found = []
-
-            def callback(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd) and not win32gui.GetWindow(
-                    hwnd, win32con.GW_OWNER
-                ):
-                    _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
-                    if owner_pid == pid:
-                        found.append(hwnd)
-                        return False
-                return True
-
+        wanted = name.translate(self._INVISIBLE).casefold()
+        exe = None
+        if pid > 0:
             try:
-                win32gui.EnumWindows(callback, None)
+                exe = Process(pid).name().casefold()
             except Exception:
-                # EnumWindows reports an error when the callback stops it early.
-                pass
-            return bool(found)
-
+                exe = None
         deadline = perf_counter() + timeout
         while True:
-            if has_window():
-                return True
+            for hwnd in self._top_level_windows():
+                try:
+                    _, owner = win32process.GetWindowThreadProcessId(hwnd)
+                except Exception:
+                    continue
+                if pid > 0 and owner == pid:
+                    return hwnd
+                if hwnd in before:
+                    continue
+                if exe:
+                    try:
+                        if Process(owner).name().casefold() == exe:
+                            return hwnd
+                    except Exception:
+                        pass
+                title = win32gui.GetWindowText(hwnd).translate(self._INVISIBLE).casefold()
+                if wanted and wanted in title:
+                    return hwnd
             if perf_counter() >= deadline:
-                return False
+                return None
             sleep(self._WINDOW_POLL_S)
 
     def _check_app_exists(self, app_id: str) -> bool:
