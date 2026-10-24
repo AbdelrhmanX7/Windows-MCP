@@ -797,6 +797,19 @@ sampling filters transient readings but cannot distinguish persistent query fail
 
 **Privacy note:** tier 1 (accessibility) never leaves the machine. Tier 2 is the only part of the resolver that sends data off the machine: when `WINDOWS_MCP_RESOLVER_VISION` is set *and* accessibility matching is weak (or the window exposes almost no elements), it sends a downscaled JPEG of **the target window only**, with numbered boxes drawn on it, plus the target text, to the configured provider (`api.anthropic.com`). Having `ANTHROPIC_API_KEY` in the environment does not enable it. Leave the variable unset if window contents must not leave the machine.
 
+### Tasks and RunParallel
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_TASKS_FILE` | _(off)_ | Persist task plans as JSON so a restart keeps them. `1`/`true`/`default` uses `tasks.json` in the platformdirs user data dir (`%LOCALAPPDATA%\windows-mcp`); any other value is a file path. Tasks that were `running` at a crash reload as `failed`. |
+| `WINDOWS_MCP_TASK_EVENTS_FILE` | _(off)_ | Append every task/plan event as one JSON line to this file. |
+| `WINDOWS_MCP_TASK_WEBHOOK` | _(off)_ | POST every event as JSON to this URL from one background thread (fire-and-forget, ordered, bounded queue). |
+| `WINDOWS_MCP_TASK_WEBHOOK_TOKEN` | _(none)_ | Sent as `Authorization: Bearer <token>` on webhook posts. |
+| `WINDOWS_MCP_TASK_WEBHOOK_TIMEOUT` | `2.0` | Seconds per webhook POST. |
+| `WINDOWS_MCP_PARALLEL_MAX` | `4` | Default `RunParallel` background concurrency (max 16). |
+| `WINDOWS_MCP_PARALLEL_TIMEOUT` | `60` | Default per-call timeout (seconds) for `RunParallel` background calls. |
+| `WINDOWS_MCP_SCREEN_LOCK_TIMEOUT` | `60` | Seconds a screen-touching call waits for the screen lock before failing with `SCREEN_BUSY`. |
+
 ### Telemetry
 
 | Variable | Default | Description |
@@ -882,6 +895,10 @@ MCP Client can access the following tools to interact with Windows:
 - `Process`: List running processes or terminate them by PID or name.
 - `Notification`: Send a Windows toast notification with a title and message. Optional `app_id` (a registered AppUserModelID, e.g. `Microsoft.Windows.Explorer`) picks the app it appears under; it defaults to Windows PowerShell.
 - `Registry`: Read, write, delete, or list Windows Registry values and keys.
+- `Tasks`: Track a multi-step request as a plan of dependent tasks (`plan`, `add`, `update`, `next`, `list`, `get`, `cancel`, `clear`, `events`). Validates the dependency graph (no cycles, no unknown ids), enforces status transitions, and splits ready tasks into a sequential screen lane and a parallel background lane. Every change emits a `task_event` (MCP log notification on logger `windows-mcp.tasks`, plus an optional JSON-lines file and webhook). Never gated, so the UI keeps updating during a user takeover. See [docs/INTEGRATION.md](docs/INTEGRATION.md).
+- `RunParallel`: Run several tool calls in one turn. Background calls run concurrently (bounded, per-call timeout); screen calls (`Click`, `Type`, `Scroll`, `Move`, `Shortcut`, `MultiSelect`, `MultiEdit`, `App` switch/resize) run one at a time, in order, through the screen lock. Each inner call passes the same control gate and policy as a direct call. Results come back in input order with per-call latency and error; calls with `task_id` update their task automatically.
+
+Screen-touching tools never interleave, even when a client sends concurrent requests: a process-wide FIFO screen lock serializes them at the tool boundary and fails with `SCREEN_BUSY` after `WINDOWS_MCP_SCREEN_LOCK_TIMEOUT` seconds.
 
 
 ## 🤝 Connect with Us

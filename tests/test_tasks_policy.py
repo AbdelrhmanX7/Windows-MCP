@@ -52,6 +52,9 @@ def test_run_parallel_inherits_strictest(args, expected):
         ("Clipboard", {"mode": "set"}, False),
         ("Screenshot", {}, False),
         ("ControlStatus", {}, False),
+        ("Click", {"target": "Save button"}, True),
+        ("Type", {"target": "Search box", "text": "milk"}, True),
+        ("Locate", {"target": "Save button"}, False),
         ("UnknownTool", {}, True),
     ],
 )

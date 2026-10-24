@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 22 tools via FastMCP:
+Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 24 tools via FastMCP:
 
 | Group | Tools |
 |---|---|
@@ -12,6 +12,7 @@ Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM 
 | Input | `Click` (also `target=` in words), `Locate`, `Type`, `Scroll`, `Move` (also drag-and-drop via `drag=True`), `Shortcut`, `MultiSelect`, `MultiEdit` |
 | Timing | `Wait`, `WaitFor` |
 | System | `App`, `PowerShell`, `FileSystem`, `Registry`, `Process`, `Clipboard`, `Notification`, `ControlStatus` |
+| Orchestration | `Tasks` (plans of dependent tasks + live `task_event`s), `RunParallel` (concurrent background calls, ordered screen calls) |
 
 Tool names are defined by the `name=` argument of each `@mcp.tool(...)` in `src/windows_mcp/tools/`; that directory is the source of truth. Note the shell tool is registered as `PowerShell`, not `Shell`. Any subset can be removed at startup with `serve --exclude-tools` (e.g. `windows-mcp serve --exclude-tools PowerShell,Registry`).
 
@@ -44,6 +45,8 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 **UIAutomation wrapper** — `uia/`: Low-level abstraction over the Windows UIAutomation COM API via `comtypes`. `core.py` wraps the main automation object, `controls.py` has control-specific logic, `patterns.py` wraps UIAutomation patterns, `enums.py` has COM enumerations, `events.py` handles event subscriptions.
 
 **Resolver** — `resolver/`: Turns a target described in words (`Click(target="Save button")`, `"File > Save As"`) into an element inside the server, so the planner needs no Snapshot round trip. `uia_source.py` reads the foreground (or named) window plus its open menus/owned popups with one cached `FindAllBuildCache` per window (raw COM element, `Cached*` properties only); `scoring.py` is pure ranking (exact > prefix > word > fuzzy over Name/LegacyIAccessible name/AutomationId/HelpText, control-type hints parsed from the text, ambiguity penalty, 1-based `nth` in reading order); `vision.py` is the opt-in tier 2 (Set-of-Mark JPEG of the window to a vision model, Anthropic via `requests`); `service.py` ties them together, applies the confidence threshold and runs `A > B` chains. Below the threshold nothing is clicked and the top 3 candidates are returned. Used by `Click`/`Type` (`target=`) and the read-only `Locate` tool in `tools/input.py`.
+
+**Task orchestration** — `tasks/` (pure Python, no Windows imports): `store.py` holds plans (DAG validation, status state machine, `next` lane split, optional JSON persistence), `events.py` the event bus (seq/ts stamping, MCP log push keyed by connection, JSON-lines file, webhook worker thread, history ring for `Tasks(mode="events")`), `screen_lock.py` the process-wide FIFO screen lock, `parallel.py` the RunParallel executor, and `runtime.py` the singleton plus `OrchestrationMiddleware`. `tools/tasks.py` registers both tools and inserts that middleware outermost, so screen-touching calls (classified by `control_policy.is_screen_call`: DIRECT plus App switch/resize, unknown tools included) are serialized before the control gate runs. `Tasks` and `RunParallel` are in `control_policy.GATE_EXEMPT`: RunParallel dispatches each inner call through `mcp.call_tool`, so every inner call is gated, policy-checked, screen-locked and tracked on its own; gating the outer call would deadlock on the gate's non-reentrant lock.
 
 **WatchDog** — `watchdog/service.py`: Runs in a separate STA thread that polls the focused element (focus is not subscribed to; see #332) and can subscribe to structure/property UIAutomation events. Notifies the Tree service of focus changes so the accessibility tree stays current.
 
@@ -93,6 +96,14 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `WINDOWS_MCP_RESOLVER_VISION` | _(off)_ | Set to `anthropic` (or `on`) to enable the tier-2 vision fallback, which sends a downscaled JPEG of the target window to the provider when accessibility matching is weak. An API key alone never enables it. Resolved in `resolver/config.py`. |
 | `WINDOWS_MCP_RESOLVER_MODEL` | `claude-haiku-5-5` | Vision model for tier 2. Key from `ANTHROPIC_API_KEY`. Resolved in `resolver/config.py`. |
 | `WINDOWS_MCP_RESOLVER_VISION_TIMEOUT` | `3.0` | Seconds allowed for the tier-2 request; on timeout or error the resolver degrades to tier-1 results. Resolved in `resolver/config.py`. |
+| `WINDOWS_MCP_TASKS_FILE` | _(off)_ | Persist task plans. `1`/`true`/`default` = `tasks.json` under platformdirs `user_data_dir("windows-mcp")`; otherwise a path. Resolved in `tasks/runtime.py`. |
+| `WINDOWS_MCP_TASK_EVENTS_FILE` | _(off)_ | JSON-lines file receiving every task/plan event. Resolved in `tasks/runtime.py`. |
+| `WINDOWS_MCP_TASK_WEBHOOK` | _(off)_ | URL that receives every event as a JSON POST (background thread, ordered, drops when 1000 are queued). Resolved in `tasks/runtime.py`. |
+| `WINDOWS_MCP_TASK_WEBHOOK_TOKEN` | _(none)_ | Bearer token for the webhook. Resolved in `tasks/runtime.py`. |
+| `WINDOWS_MCP_TASK_WEBHOOK_TIMEOUT` | `2.0` | Seconds per webhook POST. Resolved in `tasks/runtime.py`. |
+| `WINDOWS_MCP_PARALLEL_MAX` | `4` | Default RunParallel background concurrency (capped at 16). Resolved in `tasks/parallel.py`. |
+| `WINDOWS_MCP_PARALLEL_TIMEOUT` | `60` | Default per-call timeout for RunParallel background calls (screen calls are never abandoned mid-input). Resolved in `tasks/parallel.py`. |
+| `WINDOWS_MCP_SCREEN_LOCK_TIMEOUT` | `60` | Seconds a screen-touching call waits for the FIFO screen lock before a `SCREEN_BUSY` error. Resolved in `tasks/screen_lock.py`. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(off)_ | Set to `1`/`true`/`yes`/`on` to suppress the orange-red glowing border that briefly appears after every screenshot. Resolved in `desktop/flash_overlay.py`. |
 
 ## Security Context
