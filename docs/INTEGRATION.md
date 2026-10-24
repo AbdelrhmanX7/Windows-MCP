@@ -96,6 +96,8 @@ to run concurrently.
 |---|---|---|
 | `Tasks` | local | Plans of dependent tasks; status updates; `next` lanes; live `task_event`s. |
 | `RunParallel` | both | Run several tool calls in one turn: background concurrently, screen calls in order. |
+| `Do` | screen | Hand a small concrete goal to a fast model inside the server; it runs the tools itself and returns a timed transcript. See section 9. |
+| `Route` | background | Calibrated choice over fixed options (route an utterance, verify a step) with Microsoft-Decision-1. See section 9. |
 | `Screenshot` | background | Fast capture: windows, cursor, image. The cheapest way to look. |
 | `Snapshot` | background | Full UI tree with element ids (labels); `use_dom=True` for browsers. Slower. |
 | `Locate` | background | Read-only: find the element a phrase like "Save button" refers to, without clicking. |
@@ -344,13 +346,18 @@ tool turns as possible.
 3. Run every ready task in one RunParallel call per turn. Put all background-lane tasks in it,
    plus the screen-lane tasks in order (use lane="screen" for an App launch or Wait that a
    later Click/Type depends on). Set task_id on each call so progress updates itself.
-4. For UI steps, act by name: Click(target="Save button"), Type(target="search box",
+4. For a concrete desktop goal of a few UI steps in one app ("open Notepad and type ...",
+   "open Calculator and compute 12*34", "turn on dark mode"), call Do(goal=...) once instead
+   of driving each Click/Type yourself. Put everything the inner model needs in goal and
+   context (exact text, file names). Do not use Do for one-step actions, for anything
+   that needs your judgment between steps, or when a URI/PowerShell route does it in one call.
+5. For UI steps, act by name: Click(target="Save button"), Type(target="search box",
    text=...), "File > Save As" paths. Use Locate to check a target without clicking. Use
    WaitFor instead of repeated screenshots. Take a Screenshot only when you are unsure what
    is on screen; use Snapshot only when you need element labels.
-5. After each RunParallel, call Tasks(mode="next") only if the next step is not obvious.
+6. After each RunParallel, call Tasks(mode="next") only if the next step is not obvious.
    Retry a failed task once with a different route, then mark it failed with a clear error.
-6. When the plan is done, reply to the user in one or two sentences.
+7. When the plan is done, reply to the user in one or two sentences.
 ```
 
 ## 8. Latency tips
@@ -367,3 +374,127 @@ tool turns as possible.
 - **Use `WaitFor`, not polling,** when an app needs time to appear.
 - **Keep `--control` on and the policy `relaxed`.** `--no-control` serializes every tool, and `balanced`/`strict` serialize more of them.
 - **Use stateless HTTP only with the webhook.** Pushed events need a session.
+
+## 9. Do and Route: fast models inside the server
+
+The tools take about 5 to 100 ms each. The planner's own round trip (1 to 3 s per turn) is
+the bottleneck. `Do` and `Route` put small fast models inside the server, so one planner
+call can cover many steps.
+
+### Configuration
+
+Model specs are `provider:model`. The providers are `anthropic` (key `ANTHROPIC_API_KEY`,
+Messages API), `openrouter` (key `OPENROUTER_API_KEY`) and `script` (a JSON file of
+canned turns, used for tests and keyless desktop runs). Keys are read from the server's
+environment and are never logged, echoed or included in errors. Without a key, `Do` and
+`Route` fail with `no model configured: <provider> needs <KEY>`, and nothing is sent anywhere.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `WINDOWS_MCP_DO_MODEL` | `anthropic:claude-haiku-5-5` | The inner tool-calling model. Any OpenRouter chat model with tool support also works, e.g. `openrouter:anthropic/claude-haiku-5.5` or `openrouter:stepfun/step-3.7-flash`. `off` disables `Do`. |
+| `WINDOWS_MCP_ROUTER_MODEL` | `openrouter:microsoft/microsoft-decision-1` | The scorer for `Route` and for `Do`'s final-screen check. A chat model spec also works, answering through a JSON prompt. `off` disables both. |
+| `WINDOWS_MCP_MODEL_TIMEOUT` | `15` | Seconds per model request. |
+| `WINDOWS_MCP_DO_EFFORT` | `low` | Anthropic `output_config.effort` for the Do model. `off` omits it. |
+
+On Anthropic, the tool menu and system prompt are cached with `cache_control`, plus a
+rolling breakpoint on the newest turn. History is append-only, so turn 2 onward reads the
+prefix from cache. Each provider keeps one HTTP connection open per thread, which saves
+the 100 to 250 ms TLS handshake on every step.
+
+### `Do(goal, max_steps=8, timeout=60, context?, verify=true, format="text"|"json")`
+
+1. **Observe.** One `Snapshot` (accessibility text only: no image, no annotation),
+   clipped to 6000 characters.
+2. **Think.** The inner model gets the goal, the snapshot and a compact menu of the
+   tools this server really exposes (`--exclude-tools` is honored): `Snapshot`, `Click`,
+   `Type`, `Shortcut`, `App` (launch/switch), `Scroll`, `Wait`, `WaitFor`, `PowerShell`,
+   `AppSkill`, `Apps`, `Locate`, plus its own `Done(answer, success, expect)`. `Do`,
+   `RunParallel`, `Tasks` and `Screenshot` are never offered.
+3. **Act.** The model may emit several calls in one turn. They run in order, each through
+   `mcp.call_tool`, so each one passes the control gate, the policy, argument validation
+   and analytics like a direct request. After a failed call, the rest of that turn is
+   skipped and the error goes back to the model. A `USER_CONTROL`, `TAKEOVER_PENDING`,
+   `CONTROL_PREEMPTED`, `CONTROL_UNAVAILABLE` or `SCREEN_BUSY` error ends the run
+   immediately with status `blocked`.
+4. **Verify.** When `Done` carries `expect` and a router model is configured, the server
+   takes a fresh snapshot. Decision-1 then scores before, after and expect as `succeeded`,
+   `failed` or `still_loading`. That costs one 0.3 to 0.6 s call instead of another model
+   turn. On `still_loading` it waits 0.7 s and checks once more. On `failed` the model sees
+   the new screen and continues.
+
+**Screen ownership.** `Do` is a screen call: it holds the FIFO screen lock for its whole
+run, including model think time. Another request's `Click` waits until `Do` ends, so it
+can never land between two of Do's steps. Its inner calls run under that lock and are not
+queued behind it. During a user takeover, `Do` is rejected before anything runs, like a
+`RunParallel` batch that needs control.
+
+**Result** (`format="json"`):
+
+```json
+{"run_id": "do-1a2b3c4d", "goal": "...", "status": "done", "ok": true,
+ "answer": "Typed the list.", "model": "anthropic:claude-haiku-5-5",
+ "turns": 1, "step_count": 3, "total_ms": 1450.2, "model_ms": 1100.0, "tool_ms": 330.1,
+ "verify_ms": 0.0, "overhead_ms": 20.1, "overhead_per_step_ms": 6.7,
+ "usage": {"input_tokens": 1800, "output_tokens": 120, "cache_read_tokens": 0},
+ "verifications": [],
+ "steps": [{"n": 1, "tool": "App", "args": {"mode": "launch", "name": "Notepad"},
+            "latency_ms": 97.0, "ok": true, "result": "..."}]}
+```
+
+`status` is one of `done`, `failed` (the model gave up), `max_steps`, `timeout`,
+`blocked`, `error` (the model request failed) or `cancelled`. `ok` is true only for a
+successful `done`. `overhead_ms` is `total_ms` minus model, tool and verify time.
+`tool_ms` is measured around `mcp.call_tool`, so it includes the middleware.
+
+### Progress events: `do_event`
+
+`do_event`s go through the same bus as `task_event`s: MCP log notifications on logger
+`windows-mcp.tasks`, the JSONL file, the webhook and `Tasks(mode="events")`. Each one
+carries `seq` and `ts`. Each step is also reported as MCP progress
+(`progress=n, total=max_steps`) when the client sent a progress token.
+
+| `event` | Extra fields |
+|---|---|
+| `started` | `goal`, `max_steps`, `model` |
+| `model` | `turn`, `latency_ms`, `tool_calls` (names), `text` (first 200 characters) |
+| `step` | `step` (`{n, tool, args, latency_ms, ok, result or error}`, the result clipped to 300 characters), `max_steps` |
+| `verify` | `verification` (`{attempt, choice, probabilities, confidence, latency_ms, model, usage}`) or `error` |
+| `finished` | The whole result above, without `steps` |
+
+```json
+{"type": "do_event", "run_id": "do-1a2b3c4d", "event": "step", "seq": 41, "ts": 1792834078123,
+ "max_steps": 8, "step": {"n": 2, "tool": "Type", "args": {"target": "Text Editor",
+ "text": "milk"}, "latency_ms": 81.3, "ok": true, "result": "Typed milk at (400,300)."}}
+```
+
+### `Route(text, options?, instructions?, mode="route"|"verify", before?, after?, expected?)`
+
+- `mode="route"` (default) returns a choice and per-option probabilities. The default
+  options are `direct_action`, `needs_plan`, `answer_only` and `clarify`. `options` may
+  be a list of labels or a `{label: description}` object.
+- `mode="verify"` takes `before`, `after` (screen text, for example Snapshot output) and
+  `expected`. It returns `succeeded`, `failed` or `still_loading`.
+
+A front end can route an utterance before the planner model runs at all. `answer_only`
+goes straight to a chat reply, `direct_action` to a single `Do`, `needs_plan` to the full
+planner, and `clarify` back to the user.
+
+**Decision-1 API, as confirmed by docs and live calls.** It is not a chat model:
+`/api/v1/chat/completions` returns HTTP 400 and says to use the Decisions endpoint, and
+the model is missing from the default `/api/v1/models` list (it appears with
+`?output_modalities=decisions`). The request is
+`POST https://openrouter.ai/api/alpha/decisions` with the body
+`{"model": "microsoft/microsoft-decision-1", "state": <string|object|array>,
+"questions": {<name>: {"type": "choice", "instructions": "...", "criteria": {label: description}}}}`.
+The response has `answers.<name>` = `{"type": "choice", "choice", "probabilities", "confidence"}`,
+plus `usage.cost`. The adapter is `models/decision.py`, which is self-contained and also
+supports the `noul` and `score` question types.
+
+### When the planner should call Do, and when individual tools
+
+| Use `Do` | Use individual tools or `RunParallel` |
+|---|---|
+| One app, a few UI steps, an outcome you can state in words | One action (`Shortcut`, one `Click`, one URI) |
+| The steps depend on what the screen shows, but not on your judgment | The next step needs reasoning about content (reading an email, choosing a song) |
+| Speed matters more than control | You must see the result yourself before continuing |
+| Several such goals in a plan: one `Do` per screen task | Background work (files, registry, web): `RunParallel` |
