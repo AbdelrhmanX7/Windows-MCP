@@ -15,7 +15,7 @@
     "venmo": {"name": "Venmo", "domains": ["venmo.com", "paypal.com"]},
     "netflix": {"name": "Netflix", "domains": ["netflix.com", "netflix.net", "nflxext.com", "nflximg.net", "nflxvideo.net", "nflxso.net"]},
     "facebook": {"name": "Facebook", "labels": ["facebook", "fb"], "match_labels": {"fb": "token"}, "domains": ["facebook.com", "fb.com", "fb.me", "fbcdn.net", "facebook.net", "messenger.com", "meta.com", "instagram.com", "whatsapp.com", "whatsapp.net", "workplace.com", "oculus.com"]},
-    "meta": {"name": "Meta", "match": "token", "domains": ["meta.com", "facebook.com", "fb.com", "metaquest.com"]},
+    "meta": {"name": "Meta", "match": "token", "domains": ["meta.com", "meta.ai", "facebook.com", "fb.com", "metaquest.com"]},
     "instagram": {"name": "Instagram", "domains": ["instagram.com", "cdninstagram.com", "facebook.com", "meta.com", "ig.me"]},
     "whatsapp": {"name": "WhatsApp", "domains": ["whatsapp.com", "whatsapp.net", "wa.me", "facebook.com", "meta.com"]},
     "messenger": {"name": "Messenger", "match": "token", "domains": ["messenger.com", "facebook.com", "meta.com"]},

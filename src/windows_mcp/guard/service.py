@@ -71,6 +71,7 @@ _ADDRESS_TARGET = re.compile(
     r"|search or enter address",
     re.I,
 )
+_PASSWORD_TARGET = re.compile(r"pass(word|code|phrase)|\bpin\b|\botp\b|security code", re.I)
 _RISKY_NORMALIZED = frozenset(normalize_shortcut(s) for s in RISKY_SHORTCUTS)
 
 
@@ -109,7 +110,7 @@ class GuardService:
         Returns ``{"verdict": Verdict, "source": ..., "recipient": ...}`` immediately.
         """
         focused = ctx.get("focused") or {}
-        password = bool(focused.get("is_password"))
+        password = bool(focused.get("is_password") or ctx.get("has_password_field"))
         verdict: Verdict | None = None
         source = None
         recipient = None
@@ -200,7 +201,9 @@ class GuardService:
             "app": ctx.get("app"),
             "process": ctx.get("process"),
             "title": (ctx.get("title") or "")[:200],
-            "password_field": bool((ctx.get("focused") or {}).get("is_password")),
+            "password_field": bool(
+                (ctx.get("focused") or {}).get("is_password") or ctx.get("has_password_field")
+            ),
             "local_ms": round(verdict.ms, 3),
         }
         if source == "browser" and ctx.get("url"):
@@ -235,19 +238,27 @@ class GuardService:
         if name in TYPING_TOOLS:
             return True
         if name == "Click":
-            return bool(args.get("target"))
+            target = str(args.get("target") or "")
+            return bool(target) and not _ADDRESS_TARGET.search(target)
         if name == "Shortcut":
             return normalize_shortcut(str(args.get("shortcut", ""))) in _RISKY_NORMALIZED
         return False
 
-    def risk_for_input(self, name: str | None = None) -> dict | None:
+    def risk_for_input(
+        self, name: str | None = None, arguments: dict | None = None
+    ) -> dict | None:
         """A refusal payload when input into the current context needs user confirmation."""
         ctx, verdict, source, recipient = self.current()
         if verdict is None or ctx is None:
             return None
         if name == "Shortcut" and (ctx.get("focused") or {}).get("address_bar"):
             return None  # Enter / paste in the address bar navigates away; not page input.
-        password = bool((ctx.get("focused") or {}).get("is_password"))
+        target = str((arguments or {}).get("target") or "")
+        password = bool(
+            (ctx.get("focused") or {}).get("is_password")
+            or ctx.get("has_password_field")
+            or _PASSWORD_TARGET.search(target)
+        )
         risky = verdict.verdict == "dangerous" or (
             verdict.verdict == "suspicious" and (password or source == "email")
         )

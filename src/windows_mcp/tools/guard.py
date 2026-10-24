@@ -75,6 +75,7 @@ def _context_payload(ctx: dict, result: dict | Any, *, cached: bool, ms: float) 
         "domain": ctx.get("domain"),
         "focused": ctx.get("focused") or {},
         "recipients": ctx.get("recipients") or [],
+        "has_password_field": bool(ctx.get("has_password_field")),
         "page_text_chars": len(page_text) if page_text else 0,
         "guard": verdict.to_dict() if verdict else None,
         "cached": cached,
@@ -133,7 +134,7 @@ class GuardGate(Middleware):
             await self._refresh(service)
         except Exception:
             logger.debug("guard refresh failed; using cached state", exc_info=True)
-        risk = service.risk_for_input(name)
+        risk = service.risk_for_input(name, arguments)
         if risk is not None:
             if GuardService.confirmed(arguments):
                 service.publish_override(name, risk)

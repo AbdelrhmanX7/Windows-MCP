@@ -87,6 +87,10 @@ LEGIT = [
     "www.cloudflare.com",
     "calhacks.io",
     "devpost.com",
+    "microsoft.github.io",
+    "google.github.io",
+    "aws.github.io",
+    "meta.ai",
 ]
 
 SCAMS = [

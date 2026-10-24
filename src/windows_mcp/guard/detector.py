@@ -228,7 +228,15 @@ def check_host_info(host: HostInfo | None) -> _HostResult:
             cand = _lookalike(word, b)
             if cand[0] > best[0]:
                 best = cand
-        if best[0]:
+        if best[0] and "." in host.suffix and host.label in b.tokens and host.suffix in b.risky:
+            # "microsoft.github.io": usually the brand's own account on shared hosting.
+            bump(
+                30,
+                f"brand name '{host.label}' on shared hosting '.{host.suffix}' "
+                "(the account may or may not belong to the brand)",
+                best[1],
+            )
+        elif best[0]:
             bump(best[0], best[2], best[1])
         else:
             # 2. Brand name glued into a longer label: paypalsecure.com, microsoftsupport.net.
@@ -254,7 +262,10 @@ def check_host_info(host: HostInfo | None) -> _HostResult:
         if host.idn:
             bump(10, "internationalized (punycode) domain name")
         tld = host.suffix.rsplit(".", 1)[-1]
-        if host.suffix in b.risky or tld in b.risky:
+        # "microsoft.github.io" / "google.github.io": a brand's own page on a hosting suffix.
+        # Its name alone is not evidence of abuse, so the hosting suffix adds nothing.
+        brand_page = "." in host.suffix and host.label in b.tokens
+        if (host.suffix in b.risky or tld in b.risky) and not brand_page:
             bump(10, f"high-abuse domain ending '.{host.suffix}'")
         hyphens = host.label.count("-")
         if hyphens >= 3:

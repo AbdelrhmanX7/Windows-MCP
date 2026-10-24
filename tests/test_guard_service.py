@@ -285,6 +285,7 @@ def test_safe_and_unknown_pages_never_call_the_model():
         ("Type", {"text": "github.com", "target": "Address and search bar"}, False),
         ("Type", {"text": "github.com", "target": "address bar"}, False),
         ("Type", {"text": "me@x.com", "target": "Email address"}, True),
+        ("Click", {"target": "Address and search bar"}, False),
         ("Scroll", {}, False),
         ("Screenshot", {}, False),
     ],
@@ -336,3 +337,16 @@ def test_shortcut_in_address_bar_is_not_page_input():
     svc.evaluate(c)
     assert svc.risk_for_input("Shortcut") is None
     assert svc.risk_for_input("Type") is not None
+
+
+def test_password_field_on_page_or_in_target_counts_before_focus_moves():
+    svc = GuardService(publish=None, model=disabled_model())
+    svc.evaluate(ctx("https://amazom.com/"))  # suspicious, focus on the document
+    assert svc.risk_for_input("Type", {"text": "x", "loc": [1, 2]}) is None
+    assert svc.risk_for_input("Type", {"text": "x", "target": "Password"}) is not None
+    assert svc.risk_for_input("Click", {"target": "Enter PIN"}) is not None
+    page = ctx("https://amazom.com/")
+    page["has_password_field"] = True
+    res = svc.evaluate(page)
+    assert res["verdict"].verdict == "dangerous"  # lookalike + login form, on page load
+    assert svc.risk_for_input("Type", {"text": "x", "loc": [1, 2]}) is not None

@@ -69,6 +69,8 @@ RECIPIENT_FIELD_NAMES = (
 )
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z¡-￿]{2,}")
 MAX_TEXT = 6000
+PROP_IS_PASSWORD = 30019
+_COMPOSE_TITLE = re.compile(r" - Message \(|^Untitled - Message|New message|Compose|^RE: |^FW: ", re.I)
 MAX_RECIPIENT_NODES = 200
 
 _user32 = None
@@ -329,6 +331,14 @@ class Prober:
         except Exception:
             return None
 
+    def has_password_field(self, hwnd: int) -> bool:
+        """Does the page show a password box anywhere (not only the focused one)?"""
+        root = self.client.ElementFromHandle(hwnd)
+        if not root:
+            return False
+        cond = self.client.CreatePropertyCondition(PROP_IS_PASSWORD, True)
+        return bool(root.FindFirst(TREE_SCOPE_DESCENDANTS, cond))
+
     # ------------------------------------------------------------------ full probe
     def probe(
         self,
@@ -353,6 +363,7 @@ class Prober:
             "focused": {},
             "recipients": [],
             "page_text": None,
+            "has_password_field": False,
         }
         timings: dict[str, float] = {}
         if not hwnd:
@@ -383,7 +394,14 @@ class Prober:
             webmail = ctx["domain"] in WEBMAIL or (
                 ctx["url"] is not None and any(w in ctx["url"] for w in WEBMAIL)
             )
-            if recipients == "always" or (recipients == "auto" and (app == "email" or webmail)):
+            # Outlook classic composes in its own "<subject> - Message (...)" window; scanning
+            # the main window would walk the whole message list.
+            compose = (
+                webmail
+                or product == "outlook-new"
+                or (app == "email" and bool(_COMPOSE_TITLE.search(title or "")))
+            )
+            if recipients == "always" or (recipients == "auto" and compose):
                 t = time.perf_counter()
                 try:
                     ctx["recipients"] = self.recipients(hwnd)
@@ -404,6 +422,12 @@ class Prober:
                     logger.debug("guard: page text read failed: %s", exc)
                 timings["text"] = (time.perf_counter() - t) * 1000
                 ctx["text_via"] = self.text_via
+                t = time.perf_counter()
+                try:
+                    ctx["has_password_field"] = self.has_password_field(hwnd)
+                except Exception as exc:
+                    logger.debug("guard: password-field search failed: %s", exc)
+                timings["password_field"] = (time.perf_counter() - t) * 1000
         ctx["ts"] = time.time()
         ctx["probe_ms"] = round((time.perf_counter() - start) * 1000, 2)
         ctx["timings_ms"] = {k: round(v, 2) for k, v in timings.items()}

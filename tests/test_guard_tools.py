@@ -190,3 +190,26 @@ def test_input_tools_advertise_confirmed():
     for name in ("Context", "CheckLink"):
         dumped = tools[name].annotations.model_dump()
         assert dumped.get("read_only_hint", dumped.get("readOnlyHint")) is True
+
+
+async def test_run_parallel_inner_calls_are_gated(svc):
+    from windows_mcp.tasks.runtime import TaskRuntime
+    from windows_mcp.tasks.screen_lock import ScreenLock
+    from windows_mcp.tools import tasks as tasks_module
+
+    svc.evaluate(fake_ctx("https://rnicorsoft.com/login", password=True))
+    mcp, calls = build(svc)
+    tasks_module.register(
+        mcp,
+        get_desktop=lambda: None,
+        get_analytics=lambda: None,
+        runtime=TaskRuntime.create(screen_lock=ScreenLock()),
+    )
+    async with Client(mcp) as client:
+        result, text = await call(
+            client,
+            "RunParallel",
+            {"calls": [{"tool": "Type", "args": {"text": "hunter2"}}], "format": "json"},
+        )
+    assert "SCAM_GUARD_CONFIRM_REQUIRED" in text
+    assert calls == []
