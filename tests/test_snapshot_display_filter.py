@@ -317,11 +317,11 @@ class TestDisplayFiltering:
         capture_rect = desktop.get_display_union_rect([1])
         with patch(
             "windows_mcp.desktop.screenshot.Image.fromarray",
-            return_value=Image.new("RGB", (1, 1), "white"),
+            return_value=Image.new("RGB", (1920, 1080), "white"),
         ) as mock_fromarray:
             screenshot = desktop.get_screenshot(capture_rect=capture_rect)
 
-        assert screenshot.size == (1, 1)
+        assert screenshot.size == (1920, 1080)
         fake_dxcam.create.assert_called_once_with(
             device_idx=0,
             output_idx=1,
