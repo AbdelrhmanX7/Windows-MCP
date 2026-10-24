@@ -24,9 +24,12 @@ ROUTE_INSTRUCTIONS = (
 ROUTE_OPTIONS = {
     "direct_action": "One or a few obvious actions on the PC (open an app or URL, press a "
     "key, type text, change one setting); no planning needed.",
-    "needs_plan": "Several dependent steps, apps or searches; the assistant must plan.",
+    "needs_plan": "A clear request that takes several steps, apps or searches (for example "
+    "'rename these photos and email them to Sam', 'research X and write a summary'); the "
+    "assistant must plan.",
     "answer_only": "A question or chat answerable in words without touching the PC.",
-    "clarify": "Too ambiguous or incomplete to act on safely; ask the user first.",
+    "clarify": "The request is missing what it refers to (it, that, him, the thing) or is "
+    "too vague to act on; ask the user first.",
 }
 VERIFY_INSTRUCTIONS = (
     "An assistant just performed a step on a Windows PC. Compare the screen state before "

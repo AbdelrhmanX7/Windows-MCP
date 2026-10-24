@@ -495,6 +495,41 @@ The response has `answers.<name>` = `{"type": "choice", "choice", "probabilities
 plus `usage.cost`. The adapter is `models/decision.py`, which is self-contained and also
 supports the `noul` and `score` question types.
 
+### Measured (2026-10-24)
+
+**Router.** Run with `scripts/bench_models.py router --reps 2` from the Linux host:
+40 labelled utterances, 10 per class, keep-alive connection, warm-up call excluded.
+
+| Model | Accuracy | p50 | p95 | Cost per 1k routes |
+|---|---|---|---|---|
+| `openrouter:microsoft/microsoft-decision-1` | 0.95 | 279 ms | 370 ms | $0.007 |
+| `anthropic:claude-haiku-5-5` | 1.00 | 781 ms | 1070 ms | $0.061 |
+| `openrouter:deepseek/deepseek-v4.1-flash` | 0.975 | 1293 ms | 4768 ms | $0.14 |
+| `openrouter:stepfun/step-3.7-flash` | 0.74 (20 of 80 replies had no label) | 2667 ms | 5176 ms | $0.21 |
+
+- The DeepSeek and StepFun rows ran with the first wording of the option descriptions.
+  On that wording Decision-1 scored 0.925 (p50 280 ms) and Haiku 1.00.
+- Decision-1's remaining misses label two multi-step requests as `clarify`.
+- The descriptions were tuned on this same set, so expect somewhat lower accuracy on new
+  utterances.
+- Verification calls (`mode="verify"`) took 250 to 560 ms.
+
+**Do on the VM's desktop** (Windows 10, scripted model, so model time is 0). The
+overhead per step, excluding model time, was **0.7 to 1.6 ms**: `total_ms` minus model,
+tool and verify time, divided by steps. The calls themselves cost the same inside `Do`
+as direct MCP calls from a client, because `tool_ms` includes the middleware:
+
+| Tool | Inside Do | Direct |
+|---|---|---|
+| `Click(target=...)` in Calculator | 114 to 133 ms | 113 to 147 ms |
+| `App` launch | 65 to 97 ms | 68 to 89 ms |
+
+Calculator 12*34 took eight steps: 3.9 s total, 2.9 s of it in the App launch.
+
+**Do with live Haiku 5.5, against fake tools.** A Notepad grocery-list goal took one or
+two model turns at 0.9 to 2.4 s per turn. Prompt caching read about 3,000 tokens per turn
+from turn 2 onward. With Decision-1 verification on, a whole run took 1.8 to 3.2 s.
+
 ### When the planner should call Do, and when individual tools
 
 | Use `Do` | Use individual tools or `RunParallel` |
