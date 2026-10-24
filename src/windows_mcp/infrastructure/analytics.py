@@ -6,7 +6,6 @@ from fastmcp import Context
 from functools import wraps
 from pathlib import Path
 import inspect
-import posthog
 import asyncio
 import logging
 import time
@@ -57,6 +56,10 @@ class PostHogAnalytics:
         if not self.API_KEY:
             logger.warning("PostHog API key is empty; analytics client will not be initialized")
             return
+
+        # Imported here: posthog (and the requests stack it pulls in) is only needed when
+        # telemetry is on, so a server with ANONYMIZED_TELEMETRY=false starts without it.
+        import posthog
 
         self.client = posthog.Posthog(
             self.API_KEY,

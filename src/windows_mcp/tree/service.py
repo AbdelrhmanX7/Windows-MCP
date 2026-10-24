@@ -221,6 +221,40 @@ _UNSPACED_SCRIPT_RE = re.compile(
 )
 
 
+def _cached_scroll_state(node: Any) -> Optional[dict[str, Any]]:
+    """Return the scroll metadata of a vertically scrollable element, else ``None``.
+
+    The Scroll pattern properties are part of the traversal cache request, so for a cached
+    element this costs no cross-process call; asking every non-interactive element for a live
+    ScrollPattern first was one UIA round trip per element (~245 on File Explorer). Elements that
+    were not cached (their cache build failed) keep the live pattern path.
+    """
+    if not getattr(node, "_is_cached", False):
+        scroll_pattern = node.GetCachedPattern(PatternId.ScrollPattern, True)
+        if not (scroll_pattern and scroll_pattern.VerticallyScrollable):
+            return None
+        horizontal = bool(scroll_pattern.HorizontallyScrollable)
+        return {
+            'horizontal_scrollable': horizontal,
+            'horizontal_scroll_percent': round(scroll_pattern.HorizontalScrollPercent, 2) if horizontal else 0,
+            'vertical_scrollable': True,
+            'vertical_scroll_percent': round(scroll_pattern.VerticalScrollPercent, 2),
+        }
+    # Unsupported patterns report their default (False) or a NotSupported sentinel that is not
+    # a bool, so only a real True counts.
+    if node.GetCachedPropertyValue(PropertyId.ScrollVerticallyScrollableProperty) is not True:
+        return None
+    horizontal = node.GetCachedPropertyValue(PropertyId.ScrollHorizontallyScrollableProperty) is True
+    vertical_percent = node.GetCachedPropertyValue(PropertyId.ScrollVerticalScrollPercentProperty)
+    horizontal_percent = node.GetCachedPropertyValue(PropertyId.ScrollHorizontalScrollPercentProperty)
+    return {
+        'horizontal_scrollable': horizontal,
+        'horizontal_scroll_percent': round(horizontal_percent, 2) if horizontal else 0,
+        'vertical_scrollable': True,
+        'vertical_scroll_percent': round(vertical_percent, 2),
+    }
+
+
 def _is_unspaced_char(char: str) -> bool:
     return _UNSPACED_SCRIPT_RE.match(char) is not None
 
@@ -707,8 +741,8 @@ class Tree:
             if scrollable_nodes is not None:
                 if (control_type_name not in (INTERACTIVE_CONTROL_TYPE_NAMES|INFORMATIVE_CONTROL_TYPE_NAMES)) and not is_offscreen:
                     try:
-                        scroll_pattern:ScrollPattern=node.GetCachedPattern(PatternId.ScrollPattern, True)
-                        if scroll_pattern and scroll_pattern.VerticallyScrollable:
+                        scroll_state = _cached_scroll_state(node)
+                        if scroll_state is not None:
                             box = node.CachedBoundingRectangle
                             x,y=random_point_within_bounding_box(node=node,scale_factor=0.8)
                             center = Center(x=x,y=y)
@@ -717,10 +751,7 @@ class Tree:
                             localized_control_type = node.CachedLocalizedControlType
                             metadata:dict[str,Any]={}
                             metadata['has_focused']=node.CachedHasKeyboardFocus
-                            metadata['horizontal_scrollable']=scroll_pattern.HorizontallyScrollable
-                            metadata['horizontal_scroll_percent']=round(scroll_pattern.HorizontalScrollPercent,2) if scroll_pattern.HorizontallyScrollable else 0
-                            metadata['vertical_scrollable']=scroll_pattern.VerticallyScrollable
-                            metadata['vertical_scroll_percent']=round(scroll_pattern.VerticalScrollPercent,2) if scroll_pattern.VerticallyScrollable else 0
+                            metadata.update(scroll_state)
 
                             sem_scroll_name = name.strip() or automation_id or localized_control_type.capitalize() or "''"
                             self.element_budget.try_consume()

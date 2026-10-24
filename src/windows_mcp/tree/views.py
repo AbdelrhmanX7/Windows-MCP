@@ -125,7 +125,9 @@ class SemanticNode:
 
 def _format_semantic_node(node: SemanticNode) -> str:
     ctrl = node.control_type.lower()
-    name = node.name
+    # Multi-line names (e.g. tray icons "OneDrive\nNot signed in") would break the one-line-
+    # per-element tree layout.
+    name = node.name.replace("\r\n", " ").replace("\n", " ")
     if node.element_type == "window":
         return f'window "{name}"'
     if node.element_type == "structural":
@@ -148,10 +150,17 @@ def _render_semantic_node(node: SemanticNode, lines: list[str], prefix: str, is_
     if not node.children:
         return
 
+    children = [child for child in node.children if not _is_empty_window(child)]
     extension = "    " if is_last else "│   "
     new_prefix = prefix + extension
-    for i, child in enumerate(node.children):
-        _render_semantic_node(child, lines, new_prefix, i == len(node.children) - 1)
+    for i, child in enumerate(children):
+        _render_semantic_node(child, lines, new_prefix, i == len(children) - 1)
+
+
+def _is_empty_window(node: SemanticNode) -> bool:
+    """An untitled window with nothing inside it (tool windows, IME hosts) carries no
+    information for the planner, so it is left out of the rendered tree."""
+    return node.element_type == "window" and not node.children and not node.name.strip()
 
 
 def _prune_structural(node: SemanticNode) -> bool:

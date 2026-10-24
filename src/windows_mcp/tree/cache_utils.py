@@ -10,13 +10,13 @@ from _ctypes import COMError
 from windows_mcp.uia import (
     CacheRequest,
     PropertyId,
-    PatternId,
     TreeScope,
     Control,
     UIADeadElementError,
     from_com_error,
     is_timeout_exception,
 )
+from windows_mcp.uia.controls import ControlConstructors
 from typing import Optional, Any
 import logging
 
@@ -61,16 +61,15 @@ class CacheRequestFactory:
         cache_request.AddProperty(PropertyId.ClassNameProperty)
         cache_request.AddProperty(PropertyId.ControlTypeProperty)
         # RuntimeId is the only exact element identity UIA offers — it is what makes
-        # deduplication sound rather than heuristic. FrameworkId ('Chrome'/'XAML'/
-        # 'Win32'/'WPF') gives per-element provider info; IsContentElement is the
-        # content-view counterpart of the already-cached IsControlElement, and
-        # ClickablePoint is absent on elements that cannot actually be clicked.
-        # These are batched into the existing BuildUpdatedCache round-trip, so they
-        # are effectively free — measured cost is below run-to-run noise.
+        # deduplication sound rather than heuristic.
+        #
+        # Every property here is computed by the provider for every element, so the
+        # list holds only what the traversal reads: on File Explorer the full former
+        # list cost ~2.5x the core properties. IsContentElement, FrameworkId,
+        # ClickablePoint, LegacyIAccessibleState and SelectionItemSelectionContainer
+        # were never read and are no longer requested. No patterns are cached either:
+        # nothing calls GetCachedPatternAs, and Control.GetCachedPattern fetches live.
         cache_request.AddProperty(PropertyId.RuntimeIdProperty)
-        cache_request.AddProperty(PropertyId.IsContentElementProperty)
-        cache_request.AddProperty(PropertyId.FrameworkIdProperty)
-        cache_request.AddProperty(PropertyId.ClickablePointProperty)
         
         # State properties for visibility and interaction checks
         cache_request.AddProperty(PropertyId.IsEnabledProperty)
@@ -84,16 +83,10 @@ class CacheRequestFactory:
         cache_request.AddProperty(PropertyId.BoundingRectangleProperty)
         cache_request.AddProperty(PropertyId.HelpTextProperty)
         
-        # Patterns
-        cache_request.AddPattern(PatternId.LegacyIAccessiblePattern)
-        cache_request.AddPattern(PatternId.ScrollPattern)
-        cache_request.AddPattern(PatternId.WindowPattern)
-        
         # LegacyIAccessible properties
         cache_request.AddProperty(PropertyId.LegacyIAccessibleRoleProperty)
         cache_request.AddProperty(PropertyId.LegacyIAccessibleValueProperty)
         cache_request.AddProperty(PropertyId.LegacyIAccessibleDefaultActionProperty)
-        cache_request.AddProperty(PropertyId.LegacyIAccessibleStateProperty)
 
         # Scroll properties
         cache_request.AddProperty(PropertyId.ScrollHorizontallyScrollableProperty)
@@ -111,7 +104,6 @@ class CacheRequestFactory:
 
         # SelectionItem properties
         cache_request.AddProperty(PropertyId.SelectionItemIsSelectedProperty)
-        cache_request.AddProperty(PropertyId.SelectionItemSelectionContainerProperty)
 
         # Window properties
         cache_request.AddProperty(PropertyId.WindowIsModalProperty)
@@ -125,6 +117,20 @@ class CacheRequestFactory:
         cache_request.AddProperty(PropertyId.RangeValueMaximumProperty)
         
         return cache_request
+
+def _control_from_cached_element(element: Any) -> Optional[Control]:
+    """Wrap a cached raw element in its ``Control`` subclass without a provider call.
+
+    ``Control.CreateControlFromElement`` reads ``CurrentControlType``, a cross-process call per
+    element; the traversal cache request already holds the control type.
+    """
+    try:
+        control_type = element.CachedControlType
+    except Exception:
+        return Control.CreateControlFromElement(element)
+    constructor = ControlConstructors.get(control_type)
+    return constructor(element=element) if constructor else None
+
 
 class CachedControlHelper:
     """Helper class for working with cached controls."""
@@ -191,7 +197,7 @@ class CachedControlHelper:
                 length = element_array.Length
                 for i in range(length):
                     child_elem = element_array.GetElement(i)
-                    child_control = Control.CreateControlFromElement(child_elem)
+                    child_control = _control_from_cached_element(child_elem)
                     if child_control:
                         child_control._is_cached = True
                         children.append(child_control)

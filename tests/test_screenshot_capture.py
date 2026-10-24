@@ -5,7 +5,7 @@ without going through ``Desktop.get_screenshot``.
 """
 
 from typing import Tuple
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
@@ -38,8 +38,18 @@ DXGI_OUTPUTS = [
 
 @pytest.fixture(autouse=True)
 def _isolate_backend_instances(monkeypatch):
-    """Ensure each test gets a fresh backend instance pool."""
+    """Ensure each test gets a fresh backend instance pool and no retired backends."""
     monkeypatch.setattr(screenshot, "_backend_instances", {})
+    monkeypatch.setattr(screenshot, "_degraded_backends", set())
+
+
+def bgra_frame(width: int, height: int, rgb=(255, 0, 0)):
+    """A dxcam-style ``(height, width, 4)`` BGRA frame filled with ``rgb``."""
+    import numpy
+
+    frame = numpy.zeros((height, width, 4), dtype=numpy.uint8)
+    frame[..., 0], frame[..., 1], frame[..., 2], frame[..., 3] = rgb[2], rgb[1], rgb[0], 255
+    return frame
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +139,34 @@ class TestDxcamBackend:
         backend = _DxcamBackend()
         assert backend.is_available(MONITOR_0) is False
 
-    def test_is_available_false_when_capture_rect_is_none(self, monkeypatch):
+    def test_full_desktop_unavailable_when_it_spans_two_outputs(self, monkeypatch):
         monkeypatch.setattr(screenshot, "dxcam", MagicMock())
         monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+        monkeypatch.setattr(screenshot.uia, "GetVirtualScreenRect", lambda: (0, 0, 3840, 1080))
         backend = _DxcamBackend()
         assert backend.is_available(None) is False
+
+    def test_full_desktop_available_on_a_single_output(self, monkeypatch):
+        monkeypatch.setattr(screenshot, "dxcam", MagicMock())
+        monkeypatch.setattr(
+            _DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS[:1])
+        )
+        monkeypatch.setattr(screenshot.uia, "GetVirtualScreenRect", lambda: (0, 0, 1920, 1080))
+        backend = _DxcamBackend()
+        assert backend.is_available(None) is True
+
+    def test_dxcam_is_imported_lazily(self, monkeypatch):
+        monkeypatch.setattr(screenshot, "dxcam", screenshot._DXCAM_UNLOADED)
+        fake_module = MagicMock()
+        monkeypatch.setitem(__import__("sys").modules, "dxcam", fake_module)
+        assert screenshot._load_dxcam() is fake_module
+        assert screenshot.dxcam is fake_module
+
+    def test_failed_dxcam_import_disables_backend(self, monkeypatch):
+        monkeypatch.setattr(screenshot, "dxcam", screenshot._DXCAM_UNLOADED)
+        monkeypatch.setitem(__import__("sys").modules, "dxcam", None)
+        assert screenshot._load_dxcam() is None
+        assert _DxcamBackend().is_available(MONITOR_0) is False
 
     def test_is_available_false_for_cross_output_rect(self, monkeypatch):
         monkeypatch.setattr(screenshot, "dxcam", MagicMock())
@@ -191,50 +224,119 @@ class TestDxcamBackend:
         fake_dxcam.create.assert_called_once_with(
             device_idx=0,
             output_idx=1,
-            processor_backend="numpy",
+            output_color="BGRA",
         )
 
     def test_capture_returns_image(self, monkeypatch):
         fake_camera = MagicMock()
-        fake_camera.grab.return_value = [[[255, 0, 0]]]
+        fake_camera.grab.return_value = bgra_frame(1920, 1080, (255, 0, 0))
         fake_dxcam = MagicMock()
         fake_dxcam.create.return_value = fake_camera
         monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
         monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
 
-        fake_image = Image.new("RGB", (1920, 1080), "red")
-        with patch.object(Image, "fromarray", return_value=fake_image):
-            backend = _DxcamBackend()
-            result = backend.capture(MONITOR_1)
+        backend = _DxcamBackend()
+        result = backend.capture(MONITOR_1)
 
         assert isinstance(result, Image.Image)
+        assert result.mode == "RGB"
         assert result.size == (1920, 1080)
-        assert result.getbbox() is not None
+        assert result.getpixel((10, 10)) == (255, 0, 0), "BGRA must be decoded to RGB"
         fake_dxcam.create.assert_called_once_with(
             device_idx=0,
             output_idx=1,
-            processor_backend="numpy",
+            output_color="BGRA",
         )
+        fake_camera.grab.assert_called_once_with(copy=False, new_frame_only=False)
 
-    def test_capture_uses_output_relative_region_for_sub_region(self, monkeypatch):
+    def test_capture_copies_pixels_out_of_the_reused_frame_buffer(self, monkeypatch):
+        frame = bgra_frame(1920, 1080, (0, 255, 0))
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value.grab.return_value = frame
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+
+        result = _DxcamBackend().capture(MONITOR_0)
+        frame[...] = 0  # dxcam overwrites its buffer on the next grab
+
+        assert result.getpixel((0, 0)) == (0, 255, 0)
+
+    def test_capture_crops_sub_region_from_the_full_output_frame(self, monkeypatch):
+        frame = bgra_frame(1920, 1080, (255, 0, 0))
+        frame[100, 80] = (255, 0, 0, 255)  # blue pixel at the sub-region's origin
         fake_camera = MagicMock()
-        fake_camera.grab.return_value = [[[255, 0, 0]]]
+        fake_camera.grab.return_value = frame
         fake_dxcam = MagicMock()
         fake_dxcam.create.return_value = fake_camera
         monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
         monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
 
-        fake_image = Image.new("RGB", (500, 400), "red")
-        with patch.object(Image, "fromarray", return_value=fake_image):
-            backend = _DxcamBackend()
-            result = backend.capture(Rect(2000, 100, 2500, 500))
+        backend = _DxcamBackend()
+        result = backend.capture(Rect(2000, 100, 2500, 500))
 
         assert result.size == (500, 400)
-        fake_camera.grab.assert_called_once_with(
-            region=(80, 100, 580, 500),
-            copy=True,
-            new_frame_only=False,
+        assert result.getpixel((0, 0)) == (0, 0, 255)
+        assert result.getpixel((1, 1)) == (255, 0, 0)
+        # The full frame is grabbed so dxcam's last-frame fallback serves any region.
+        fake_camera.grab.assert_called_once_with(copy=False, new_frame_only=False)
+
+    def test_capture_none_rect_uses_the_virtual_screen_output(self, monkeypatch):
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value.grab.return_value = bgra_frame(1920, 1080)
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(
+            _DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS[:1])
         )
+        monkeypatch.setattr(screenshot.uia, "GetVirtualScreenRect", lambda: (0, 0, 1920, 1080))
+
+        result = _DxcamBackend().capture(None)
+
+        assert result.size == (1920, 1080)
+        fake_dxcam.create.assert_called_once_with(
+            device_idx=0, output_idx=0, output_color="BGRA"
+        )
+
+    def test_repeated_failures_retire_the_backend(self, monkeypatch):
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value.grab.return_value = None
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+        backend = _DxcamBackend()
+
+        for _ in range(_DxcamBackend._MAX_FAILURES - 1):
+            with pytest.raises(RuntimeError):
+                backend.capture(MONITOR_0)
+            assert "dxcam" not in screenshot._degraded_backends
+        with pytest.raises(RuntimeError):
+            backend.capture(MONITOR_0)
+        assert "dxcam" in screenshot._degraded_backends
+
+    def test_success_resets_the_failure_count(self, monkeypatch):
+        fake_camera = MagicMock()
+        fake_camera.grab.side_effect = [None, None, bgra_frame(1920, 1080), None, None]
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value = fake_camera
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+        backend = _DxcamBackend()
+
+        for expect_ok in (False, False, True, False, False):
+            if expect_ok:
+                backend.capture(MONITOR_0)
+            else:
+                with pytest.raises(RuntimeError):
+                    backend.capture(MONITOR_0)
+        assert "dxcam" not in screenshot._degraded_backends
+
+    def test_import_error_retires_the_backend_at_once(self, monkeypatch):
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value.grab.side_effect = ModuleNotFoundError("cv2")
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+
+        with pytest.raises(ImportError):
+            _DxcamBackend().capture(MONITOR_0)
+        assert "dxcam" in screenshot._degraded_backends
 
     def test_capture_raises_on_none_frame(self, monkeypatch):
         fake_camera = MagicMock()
@@ -265,14 +367,14 @@ class TestDxcamBackend:
         assert _DxcamBackend._resolve_region(external) == (1, 0, None)
         assert _DxcamBackend._resolve_region(laptop) == (0, 0, None)
 
-        with patch.object(Image, "fromarray", return_value=Image.new("RGB", (1920, 1080))):
-            result = _DxcamBackend().capture(external)
+        fake_camera.grab.return_value = bgra_frame(1920, 1080)
+        result = _DxcamBackend().capture(external)
 
         assert result.size == (1920, 1080)
         fake_dxcam.create.assert_called_once_with(
             device_idx=1,
             output_idx=0,
-            processor_backend="numpy",
+            output_color="BGRA",
         )
 
     def test_capture_rejects_frame_from_another_monitor(self, monkeypatch):
@@ -283,10 +385,9 @@ class TestDxcamBackend:
         monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
         monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
 
-        wrong_monitor = Image.new("RGB", (2560, 1600), "red")
-        with patch.object(Image, "fromarray", return_value=wrong_monitor):
-            with pytest.raises(RuntimeError, match="2560x1600 frame for a 1920x1080 region"):
-                _DxcamBackend().capture(MONITOR_1)
+        fake_camera.grab.return_value = bgra_frame(2560, 1600)
+        with pytest.raises(RuntimeError, match="2560x1600 frame for a 1920x1080 region"):
+            _DxcamBackend().capture(MONITOR_1)
 
     def test_capture_leaves_empty_frame_to_usability_check(self, monkeypatch):
         """Issue #371: an empty frame is returned so capture() can retire dxcam."""
@@ -296,8 +397,8 @@ class TestDxcamBackend:
         monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
         monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
 
-        with patch.object(Image, "fromarray", return_value=Image.new("RGB", (0, 0))):
-            result = _DxcamBackend().capture(MONITOR_1)
+        fake_camera.grab.return_value = bgra_frame(0, 0)
+        result = _DxcamBackend().capture(MONITOR_1)
 
         assert result.size == (0, 0)
 
@@ -485,17 +586,33 @@ class TestCapture:
         with pytest.raises(ValueError, match="nonexistent"):
             capture(None, backend="nonexistent")
 
-    def test_auto_skips_dxcam_when_capture_rect_is_none(self, monkeypatch):
+    def test_auto_skips_dxcam_when_full_desktop_spans_outputs(self, monkeypatch):
         monkeypatch.setattr(screenshot, "dxcam", MagicMock())
         monkeypatch.setattr(screenshot, "mss", None)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+        monkeypatch.setattr(screenshot.uia, "GetVirtualScreenRect", lambda: (0, 0, 3840, 1080))
         fake_img = Image.new("RGB", (1920, 1080), "white")
         monkeypatch.setattr(
             screenshot, "ImageGrab", MagicMock(grab=MagicMock(return_value=fake_img))
         )
 
         image, backend_name = capture(None, backend="auto")
-        # dxcam is_available returns False for None rect, mss is None → pillow
+        # The virtual screen covers two outputs, mss is None → pillow
         assert backend_name == "pillow"
+
+    def test_auto_uses_dxcam_for_full_desktop_on_one_output(self, monkeypatch):
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value.grab.return_value = bgra_frame(1920, 1080)
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(
+            _DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS[:1])
+        )
+        monkeypatch.setattr(screenshot.uia, "GetVirtualScreenRect", lambda: (0, 0, 1920, 1080))
+
+        image, backend_name = capture(None, backend="auto")
+
+        assert backend_name == "dxcam"
+        assert image.size == (1920, 1080)
 
     def test_auto_falls_back_when_all_unavailable(self, monkeypatch):
         monkeypatch.setattr(screenshot, "dxcam", None)
@@ -596,8 +713,8 @@ class TestCapture:
             screenshot, "ImageGrab", MagicMock(grab=MagicMock(return_value=fake_img))
         )
 
-        with patch.object(Image, "fromarray", return_value=Image.new("RGB", (2560, 1600))):
-            image, backend_name = capture(MONITOR_1, backend="auto")
+        fake_camera.grab.return_value = bgra_frame(2560, 1600)
+        image, backend_name = capture(MONITOR_1, backend="auto")
 
         assert backend_name == "pillow"
         assert image is fake_img

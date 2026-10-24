@@ -139,7 +139,9 @@ class TestShowCaptureFlash:
         )
         monkeypatch.setattr(flash_overlay, "_premultiplied_bgra", lambda image, intensity: b"")
         monkeypatch.setattr(
-            flash_overlay, "_push_bitmap", lambda *args: calls.setdefault("pushed", args)
+            flash_overlay,
+            "_push_bitmap",
+            lambda *args, **kwargs: calls.setdefault("pushed", args),
         )
         monkeypatch.setattr(flash_overlay, "_pump_messages", lambda hwnd: None)
         monkeypatch.setattr(flash_overlay._user32, "DestroyWindow", lambda hwnd: None)

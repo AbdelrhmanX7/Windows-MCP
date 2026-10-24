@@ -13,7 +13,6 @@ from datetime import datetime
 from pathlib import Path
 
 from fastmcp.utilities.types import Image
-from textwrap import dedent
 from windows_mcp.desktop.service import Desktop, Size
 from windows_mcp.desktop.utils import remove_private_use_chars, repair_surrogates
 
@@ -30,6 +29,12 @@ SAVE_FORMATS = {
     ".webp": "WEBP",
 }
 
+#: Inline image formats accepted by ``WINDOWS_MCP_IMAGE_FORMAT`` and the ``image_format`` tool
+#: argument, mapped to the Pillow encoder name.
+IMAGE_FORMATS = {"jpeg": "JPEG", "jpg": "JPEG", "png": "PNG", "webp": "WEBP"}
+DEFAULT_IMAGE_FORMAT = "jpeg"
+DEFAULT_IMAGE_QUALITY = 80
+
 
 def _screenshot_scale() -> float:
     value = os.getenv("WINDOWS_MCP_SCREENSHOT_SCALE", "1.0")
@@ -42,6 +47,89 @@ def _screenshot_scale() -> float:
         logger.warning("WINDOWS_MCP_SCREENSHOT_SCALE %r out of range [0.1, 1.0], clamping", scale)
         scale = max(0.1, min(1.0, scale))
     return scale
+
+
+def resolve_image_format(value: str | None = None) -> str:
+    """Return the canonical inline image format (``"jpeg"``, ``"png"`` or ``"webp"``).
+
+    Args:
+        value: A per-call format. When empty, ``WINDOWS_MCP_IMAGE_FORMAT`` is used, and when
+            that is unset or invalid, ``jpeg``.
+
+    Returns:
+        The canonical format name, used as the MCP image MIME subtype.
+
+    Raises:
+        ValueError: If a per-call ``value`` is not a supported format.
+    """
+    if value is not None and str(value).strip():
+        normalized = str(value).strip().lower()
+        if normalized not in IMAGE_FORMATS:
+            supported = ", ".join(sorted({"jpeg", "png", "webp"}))
+            raise ValueError(f"image_format must be one of {supported}, got {value!r}")
+        return "jpeg" if normalized == "jpg" else normalized
+    env_value = os.getenv("WINDOWS_MCP_IMAGE_FORMAT", "").strip().lower()
+    if not env_value:
+        return DEFAULT_IMAGE_FORMAT
+    if env_value not in IMAGE_FORMATS:
+        logger.warning(
+            "Invalid WINDOWS_MCP_IMAGE_FORMAT value %r, using %s", env_value, DEFAULT_IMAGE_FORMAT
+        )
+        return DEFAULT_IMAGE_FORMAT
+    return "jpeg" if env_value == "jpg" else env_value
+
+
+def _image_quality() -> int:
+    value = os.getenv("WINDOWS_MCP_IMAGE_QUALITY", "").strip()
+    if not value:
+        return DEFAULT_IMAGE_QUALITY
+    try:
+        quality = int(value)
+    except ValueError:
+        logger.warning(
+            "Invalid WINDOWS_MCP_IMAGE_QUALITY value %r, using %d", value, DEFAULT_IMAGE_QUALITY
+        )
+        return DEFAULT_IMAGE_QUALITY
+    if not (1 <= quality <= 100):
+        logger.warning("WINDOWS_MCP_IMAGE_QUALITY %r out of range [1, 100], clamping", quality)
+        quality = max(1, min(100, quality))
+    return quality
+
+
+def encode_image(image, image_format: str, *, annotated: bool = False) -> bytes:
+    """Encode a screenshot for the inline MCP image.
+
+    JPEG is the default because it encodes a 1080p desktop roughly 15x faster than PNG and at
+    about half the size. Annotated images keep full chroma (4:4:4) so the thin coloured boxes and
+    small labels stay sharp; plain screenshots use 4:2:0. WebP uses ``method=0``, its fastest
+    setting. PNG keeps Pillow's default compression, as before.
+
+    Args:
+        image: The PIL image to encode.
+        image_format: A canonical format from ``resolve_image_format``.
+        annotated: Whether the image carries drawn annotations or grid lines.
+
+    Returns:
+        The encoded bytes.
+    """
+    buffered = io.BytesIO()
+    if image_format == "png":
+        image.save(buffered, format="PNG")
+    else:
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
+        quality = _image_quality()
+        if image_format == "webp":
+            image.save(buffered, format="WEBP", quality=quality, method=0)
+        else:
+            image.save(
+                buffered,
+                format="JPEG",
+                quality=quality,
+                optimize=False,
+                subsampling=0 if annotated else 2,
+            )
+    return buffered.getvalue()
 
 
 def _snapshot_profile_enabled() -> bool:
@@ -96,21 +184,27 @@ def resolve_save_path(save_path: str | None) -> tuple[Path, str] | None:
     return path.resolve(), image_format
 
 
-def save_screenshot(image, target: tuple[Path, str], png_bytes: bytes | None = None) -> str:
+def save_screenshot(
+    image,
+    target: tuple[Path, str],
+    encoded: bytes | None = None,
+    encoded_format: str = "png",
+) -> str:
     """Write a captured screenshot to disk and return the absolute path written.
 
     Args:
         image: The PIL image to save (the same pixels returned inline).
         target: ``(file_path, pil_format)`` as returned by ``resolve_save_path``.
-        png_bytes: Already-encoded PNG data for ``image``; reused for ``.png`` targets so the
-            image is not encoded twice.
+        encoded: Already-encoded data for ``image``; reused when the file's format matches
+            ``encoded_format`` so the image is not encoded twice.
+        encoded_format: The canonical format of ``encoded`` (``"png"``, ``"jpeg"``, ``"webp"``).
 
     Returns:
         The absolute file path as a string.
     """
     path, image_format = target
-    if image_format == "PNG" and png_bytes:
-        path.write_bytes(png_bytes)
+    if encoded and IMAGE_FORMATS.get(encoded_format) == image_format:
+        path.write_bytes(encoded)
         return str(path)
     if image_format == "JPEG" and image.mode not in ("RGB", "L"):
         image = image.convert("RGB")
@@ -131,6 +225,7 @@ def capture_desktop_state(
     region: list[int] | None,
     tool_name: str,
     save_path: str | None = None,
+    image_format: str | None = None,
 ):
     profile_enabled = _snapshot_profile_enabled()
     profile_started_at = time.perf_counter()
@@ -142,6 +237,7 @@ def capture_desktop_state(
     if use_dom and not use_ui_tree:
         raise ValueError("use_dom=True requires use_ui_tree=True")
 
+    inline_format = resolve_image_format(image_format)
     save_target = resolve_save_path(save_path)
     if save_target is not None and not use_vision:
         raise ValueError("save_path requires use_vision=True")
@@ -168,31 +264,34 @@ def capture_desktop_state(
         desktop_state_ms = (time.perf_counter() - stage_started_at) * 1000
         stage_started_at = time.perf_counter()
 
-    interactive_elements = desktop_state.tree_state.interactive_elements_to_string()
-    scrollable_elements = desktop_state.tree_state.scrollable_elements_to_string()
     semantic_tree = desktop_state.tree_state.semantic_tree_to_string()
     windows = desktop_state.windows_to_string()
     active_window = desktop_state.active_window_to_string()
-    active_desktop = desktop_state.active_desktop_to_string()
-    all_desktops = desktop_state.desktops_to_string()
+    active_desktop = str(desktop_state.active_desktop.get("name") or "")
+    all_desktops = ", ".join(
+        str(desktop.get("name") or "") for desktop in desktop_state.all_desktops
+    )
     if profile_enabled:
         metadata_render_ms = (time.perf_counter() - stage_started_at) * 1000
         stage_started_at = time.perf_counter()
 
     screenshot_bytes = None
     if use_vision and desktop_state.screenshot is not None:
-        buffered = io.BytesIO()
-        desktop_state.screenshot.save(buffered, format="PNG")
-        screenshot_bytes = buffered.getvalue()
-        buffered.close()
+        screenshot_bytes = encode_image(
+            desktop_state.screenshot,
+            inline_format,
+            annotated=use_annotation or grid_lines is not None,
+        )
     if profile_enabled:
         screenshot_encode_ms = (time.perf_counter() - stage_started_at) * 1000
         logger.info(
-            "%s profile: desktop_state_ms=%.1f metadata_render_ms=%.1f png_encode_ms=%.1f total_ms=%.1f use_vision=%s use_dom=%s use_ui_tree=%s use_annotation=%s display=%s",
+            "%s profile: desktop_state_ms=%.1f metadata_render_ms=%.1f encode_ms=%.1f format=%s bytes=%d total_ms=%.1f use_vision=%s use_dom=%s use_ui_tree=%s use_annotation=%s display=%s",
             tool_name,
             desktop_state_ms,
             metadata_render_ms,
             screenshot_encode_ms,
+            inline_format,
+            len(screenshot_bytes or b""),
             (time.perf_counter() - profile_started_at) * 1000,
             use_vision,
             use_dom,
@@ -205,18 +304,20 @@ def capture_desktop_state(
     if save_target is not None:
         if desktop_state.screenshot is None:
             raise ValueError("No screenshot was captured, so nothing could be saved to save_path")
-        saved_path = save_screenshot(desktop_state.screenshot, save_target, screenshot_bytes)
+        saved_path = save_screenshot(
+            desktop_state.screenshot, save_target, screenshot_bytes, inline_format
+        )
 
     return {
         "desktop_state": desktop_state,
-        "interactive_elements": interactive_elements,
-        "scrollable_elements": scrollable_elements,
         "semantic_tree": semantic_tree,
         "windows": windows,
         "active_window": active_window,
         "active_desktop": active_desktop,
         "all_desktops": all_desktops,
         "screenshot_bytes": screenshot_bytes,
+        "image_format": inline_format,
+        "use_ui_tree": use_ui_tree,
         "saved_path": saved_path,
     }
 
@@ -228,8 +329,6 @@ def build_snapshot_response(
     ui_detail_note: str | None = None,
 ):
     desktop_state = capture_result["desktop_state"]
-    interactive_elements = capture_result["interactive_elements"]
-    scrollable_elements = capture_result["scrollable_elements"]
     semantic_tree = capture_result["semantic_tree"]
     windows = capture_result["windows"]
     active_window = capture_result["active_window"]
@@ -240,16 +339,12 @@ def build_snapshot_response(
     # Some applications (e.g. VS Code) embed Unicode Private Use Area characters in the
     # Automation Element Name property of certain UI elements (e.g. navigation bar items in VS Code).
     # These characters can cause display issues, so we strip them out before rendering.
-    interactive_elements = remove_private_use_chars(interactive_elements)
-    scrollable_elements = remove_private_use_chars(scrollable_elements)
     semantic_tree = remove_private_use_chars(semantic_tree)
 
     # Emoji reach us from UIA as raw UTF-16 surrogate pairs. Left alone they make
     # the strict UTF-8 JSON encoder reject the entire response, so every string
     # heading into it is repaired -- window titles included, since an emoji in a
     # window title is enough to take the whole snapshot down.
-    interactive_elements = repair_surrogates(interactive_elements)
-    scrollable_elements = repair_surrogates(scrollable_elements)
     semantic_tree = repair_surrogates(semantic_tree)
     windows = repair_surrogates(windows)
     active_window = repair_surrogates(active_window)
@@ -297,27 +392,22 @@ def build_snapshot_response(
     if ui_detail_note:
         metadata_text += f"{ui_detail_note}\n"
 
-    response_text = dedent(f'''
-    {metadata_text}
-    Active Desktop:
-    {active_desktop}
-
-    All Desktops:
-    {all_desktops}
-
-    Focused Window:
-    {active_window}
-
-    Opened Windows:
-    {windows}
-    ''')
+    # One compact block: no tabulate frame around a single desktop name, and no indentation
+    # left over from a dedent that the unindented metadata lines defeat.
+    desktop_lines = f"Active Desktop: {active_desktop}"
+    if all_desktops != active_desktop:
+        desktop_lines += f"\nAll Desktops: {all_desktops}"
+    sections = [metadata_text.rstrip("\n"), desktop_lines]
+    if capture_result.get("use_ui_tree", True):
+        # Without the UI tree no window is enumerated, so these would only say "none found".
+        sections.append(f"Focused Window:\n{active_window}")
+        sections.append(f"Opened Windows:\n{windows}")
     if include_ui_details:
-        response_text += dedent(f'''
-
-    UI Tree:
-    {semantic_tree or "No elements found."}''')
-
+        sections.append(f"UI Tree:\n{semantic_tree or 'No elements found.'}")
+    response_text = "\n\n".join(sections)
     response = [response_text]
     if screenshot_bytes:
-        response.append(Image(data=screenshot_bytes, format="png"))
+        response.append(
+            Image(data=screenshot_bytes, format=capture_result.get("image_format") or "png")
+        )
     return response

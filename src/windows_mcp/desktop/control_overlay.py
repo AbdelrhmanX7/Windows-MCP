@@ -326,9 +326,16 @@ class _Indicator:
         try:
             self.heartbeat = time.monotonic()
             self.started.set()
+            applied_version = -1
             while True:
                 with self.condition:
-                    self.condition.wait(timeout=_REFRESH_SECONDS)
+                    # A change() that lands while this thread is rendering below has already
+                    # notified; wait only when nothing new is pending, or a capture would sit
+                    # out a full refresh interval before its hide is applied.
+                    self.condition.wait_for(
+                        lambda: self.stopping or self.version != applied_version,
+                        timeout=_REFRESH_SECONDS,
+                    )
                     if self.stopping:
                         return
                     active, pending = self.active, self.pending
@@ -398,6 +405,7 @@ class _Indicator:
                 with self.condition:
                     self.heartbeat = time.monotonic()
                     self.applied = version
+                    applied_version = version
                     self.condition.notify_all()
         except BaseException as exc:
             logger.exception("AI control indicator failed")
@@ -511,14 +519,24 @@ def is_healthy() -> bool:
 
 @contextmanager
 def suspend_for_capture():
-    """Serialize captures and wait for the indicator to disappear first."""
+    """Serialize captures and wait for the indicator to disappear first.
+
+    Yields:
+        ``True`` when the indicator was showing and has just been hidden, so the caller knows
+        the compositor still has to present a frame without it before pixels are read.
+    """
     with _capture_lock:
         with _lock:
             indicator = _instance
+        was_visible = False
         if indicator:
+            condition = getattr(indicator, "condition", None)
+            if condition is not None:
+                with condition:
+                    was_visible = bool(indicator.active and not indicator.suspended)
             indicator.change(suspended=1)
         try:
-            yield
+            yield was_visible
         finally:
             if indicator:
                 indicator.change(suspended=-1)

@@ -1,23 +1,40 @@
 from dataclasses import dataclass
+import ctypes
 import logging
 import os
+from typing import Any
 from _ctypes import COMError
 
 from PIL import Image, ImageGrab
 
-try:
-    import dxcam
-except Exception:
-    dxcam = None
+import windows_mcp.uia as uia
+
+logger = logging.getLogger(__name__)
+
+#: Sentinel for "dxcam not imported yet". dxcam pulls in numpy and enumerates every DXGI
+#: adapter at import time (~200 ms), so it is loaded on the first capture that can use it
+#: instead of at server startup. ``None`` means the import failed (no DXGI, session 0, ...).
+_DXCAM_UNLOADED: Any = object()
+dxcam: Any = _DXCAM_UNLOADED
+
+
+def _load_dxcam() -> Any:
+    """Import dxcam on first use and return the module, or ``None`` when it is unusable."""
+    global dxcam
+    if dxcam is _DXCAM_UNLOADED:
+        try:
+            import dxcam as module
+        except Exception:
+            logger.debug("dxcam is unavailable; DXGI capture disabled", exc_info=True)
+            module = None
+        dxcam = module
+    return dxcam
+
 
 try:
     import mss
 except ImportError:
     mss = None
-
-import windows_mcp.uia as uia
-
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +63,26 @@ def _crop_screenshot(screenshot: Image.Image, capture_rect: uia.Rect | None) -> 
     if capture_rect is None:
         return screenshot
     return screenshot.crop(_build_crop_box(capture_rect))
+
+
+def _virtual_screen_rect() -> uia.Rect:
+    left, top, width, height = uia.GetVirtualScreenRect()
+    return uia.Rect(left, top, left + width, top + height)
+
+
+def wait_for_composition() -> None:
+    """Block until the desktop compositor has presented a frame (``DwmFlush``).
+
+    Called after an overlay was hidden for capture: hiding a window returns before DWM has
+    composed a frame without it, and DXGI desktop duplication hands back the latest *presented*
+    frame. Waiting for the next present (at most one refresh interval) guarantees the pixels
+    read afterwards no longer contain the hidden overlay. Failures are ignored; DWM is always on
+    in Windows 8 and later.
+    """
+    try:
+        ctypes.windll.dwmapi.DwmFlush()
+    except Exception:
+        logger.debug("DwmFlush failed", exc_info=True)
 
 
 def get_screenshot_backend() -> str:
@@ -102,17 +139,28 @@ class _ScreenshotBackend:
 
 
 class _DxcamBackend(_ScreenshotBackend):
-    """DXGI-based capture via the *dxcam* library."""
+    """DXGI-based capture via the *dxcam* library.
+
+    Frames are requested as raw BGRA, which needs no colour conversion inside dxcam (its RGB
+    path wants OpenCV or a compiled kernel that needs the OpenMP runtime, and fails without
+    them); Pillow decodes BGRA to RGB in C. The whole output is always grabbed and sub-regions
+    are cropped here, because dxcam only falls back to its last frame (on a static desktop,
+    when DXGI has no new frame) for the exact region it captured last.
+    """
 
     name = "dxcam"
     priority = 10
 
+    #: Consecutive capture failures after which dxcam is retired for the process.
+    _MAX_FAILURES = 3
+
     def __init__(self) -> None:
         self._camera_cache: dict[tuple[int, int], object] = {}
+        self._failures = 0
 
     @staticmethod
     def _iter_outputs() -> list[DxcamOutput]:
-        if dxcam is None:
+        if _load_dxcam() is None:
             return []
 
         factory = getattr(dxcam, "__factory", None)
@@ -150,11 +198,8 @@ class _DxcamBackend(_ScreenshotBackend):
         return outputs
 
     @classmethod
-    def _resolve_region(
-        cls,
-        capture_rect: uia.Rect,
-    ) -> tuple[int, int, tuple[int, int, int, int] | None] | None:
-        """Return ``(device_idx, output_idx, region)`` when one DXGI output contains the rect."""
+    def _resolve_output(cls, capture_rect: uia.Rect) -> DxcamOutput | None:
+        """Return the DXGI output that fully contains ``capture_rect``, if any."""
         for output in cls._iter_outputs():
             output_rect = output.rect
             if (
@@ -163,26 +208,38 @@ class _DxcamBackend(_ScreenshotBackend):
                 and output_rect.right >= capture_rect.right
                 and output_rect.bottom >= capture_rect.bottom
             ):
-                if output_rect == capture_rect:
-                    return output.device_idx, output.output_idx, None
-                return (
-                    output.device_idx,
-                    output.output_idx,
-                    (
-                        capture_rect.left - output_rect.left,
-                        capture_rect.top - output_rect.top,
-                        capture_rect.right - output_rect.left,
-                        capture_rect.bottom - output_rect.top,
-                    ),
-                )
+                return output
         return None
 
+    @classmethod
+    def _resolve_region(
+        cls,
+        capture_rect: uia.Rect,
+    ) -> tuple[int, int, tuple[int, int, int, int] | None] | None:
+        """Return ``(device_idx, output_idx, region)`` when one DXGI output contains the rect."""
+        output = cls._resolve_output(capture_rect)
+        if output is None:
+            return None
+        output_rect = output.rect
+        if output_rect == capture_rect:
+            return output.device_idx, output.output_idx, None
+        return (
+            output.device_idx,
+            output.output_idx,
+            (
+                capture_rect.left - output_rect.left,
+                capture_rect.top - output_rect.top,
+                capture_rect.right - output_rect.left,
+                capture_rect.bottom - output_rect.top,
+            ),
+        )
+
     def is_available(self, capture_rect: uia.Rect | None) -> bool:
-        if dxcam is None:
+        if _load_dxcam() is None:
             return False
-        if capture_rect is None:
-            return False
-        return self._resolve_region(capture_rect) is not None
+        # A full-desktop request is served when the virtual screen is a single output.
+        rect = capture_rect if capture_rect is not None else _virtual_screen_rect()
+        return self._resolve_region(rect) is not None
 
     def _get_camera(self, device_idx: int, output_idx: int) -> object:
         camera_key = (device_idx, output_idx)
@@ -191,36 +248,83 @@ class _DxcamBackend(_ScreenshotBackend):
             camera = dxcam.create(
                 device_idx=device_idx,
                 output_idx=output_idx,
-                processor_backend="numpy",
+                output_color="BGRA",
             )
             self._camera_cache[camera_key] = camera
         return camera
 
     def capture(self, capture_rect: uia.Rect | None) -> Image.Image:
-        resolved = self._resolve_region(capture_rect)
-        if resolved is None:
+        try:
+            image = self._capture(capture_rect)
+        except ImportError:
+            # A broken installation (a missing native dependency) fails the same way on
+            # every call; stop paying for it.
+            _degraded_backends.add(self.name)
+            raise
+        except Exception:
+            # Anything else may be transient (display change, secure desktop); retire the
+            # backend only after repeated consecutive failures.
+            self._failures += 1
+            if self._failures >= self._MAX_FAILURES:
+                _degraded_backends.add(self.name)
+            raise
+        self._failures = 0
+        return image
+
+    def _capture(self, capture_rect: uia.Rect | None) -> Image.Image:
+        rect = capture_rect if capture_rect is not None else _virtual_screen_rect()
+        output = self._resolve_output(rect)
+        if output is None:
             raise ValueError(
                 "DXGI capture supports only regions fully contained within one display"
             )
-        device_idx, output_idx, region = resolved
-        camera = self._get_camera(device_idx, output_idx)
-        frame = camera.grab(region=region, copy=True, new_frame_only=False)
+        camera = self._get_camera(output.device_idx, output.output_idx)
+        frame = camera.grab(copy=False, new_frame_only=False)
         if frame is None:
             raise RuntimeError("DXGI capture returned no frame")
-        image = Image.fromarray(frame)
+        image = _bgra_frame_to_image(frame)
         # dxcam addresses outputs per adapter, so a stale or mismatched output can hand
         # back another monitor's pixels without raising (issue #416). A frame whose size
-        # differs from the requested rect is never the right picture; raise so the chain
-        # falls through to a backend that captures by desktop coordinates instead. Empty
+        # differs from the output is never the right picture; raise so the chain falls
+        # through to a backend that captures by desktop coordinates instead. Empty
         # frames are left to _is_usable_capture, which retires the backend (issue #371).
-        expected_size = (capture_rect.width(), capture_rect.height())
+        output_rect = output.rect
+        expected_size = (output_rect.width(), output_rect.height())
         if image.width > 0 and image.height > 0 and image.size != expected_size:
             raise RuntimeError(
                 f"DXGI capture returned a {image.width}x{image.height} frame for a "
                 f"{expected_size[0]}x{expected_size[1]} region "
-                f"(device={device_idx}, output={output_idx})"
+                f"(device={output.device_idx}, output={output.output_idx})"
+            )
+        if image.width > 0 and image.height > 0 and output_rect != rect:
+            image = image.crop(
+                (
+                    rect.left - output_rect.left,
+                    rect.top - output_rect.top,
+                    rect.right - output_rect.left,
+                    rect.bottom - output_rect.top,
+                )
             )
         return image
+
+
+def _bgra_frame_to_image(frame: Any) -> Image.Image:
+    """Decode a dxcam ``(height, width, 4)`` BGRA frame into a new RGB image.
+
+    The frame may be dxcam's reusable internal buffer, so its pixels are copied out here.
+    """
+    shape = getattr(frame, "shape", None)
+    if not shape or len(shape) != 3 or shape[2] != 4:
+        raise RuntimeError(f"DXGI capture returned an unexpected frame shape {shape!r}")
+    height, width = int(shape[0]), int(shape[1])
+    if width <= 0 or height <= 0:
+        return Image.new("RGB", (0, 0))
+    flags = getattr(frame, "flags", None)
+    if flags is not None and not flags["C_CONTIGUOUS"]:
+        import numpy
+
+        frame = numpy.ascontiguousarray(frame)
+    return Image.frombytes("RGB", (width, height), frame, "raw", "BGRX")
 
 
 class _PillowBackend(_ScreenshotBackend):
@@ -335,6 +439,27 @@ def _is_usable_capture(image: Image.Image | None) -> bool:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def warm_up() -> None:
+    """Load dxcam and open the desktop-duplication camera ahead of the first capture.
+
+    Run in the background after the server is up, on the UIA worker that later captures, so
+    the first Screenshot does not pay for importing dxcam/numpy and creating the camera. Does
+    nothing when another backend is forced; never raises.
+    """
+    if get_screenshot_backend() not in ("auto", "dxcam"):
+        return
+    try:
+        backend = _get_backend("dxcam")
+        rect = _virtual_screen_rect()
+        if not backend.is_available(rect):
+            return
+        output = backend._resolve_output(rect)
+        if output is not None:
+            backend._get_camera(output.device_idx, output.output_idx)
+    except Exception:
+        logger.debug("Screenshot warm-up failed", exc_info=True)
 
 
 def capture(

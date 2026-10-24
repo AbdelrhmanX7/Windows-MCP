@@ -252,6 +252,15 @@ def _start_watchdog(desktop):
         return None
 
 
+async def _warm_up_capture(desktop: Any) -> None:
+    from windows_mcp.infrastructure import run_uia_affine
+
+    try:
+        await run_uia_affine(desktop.warm_up_capture)
+    except Exception:
+        logger.debug("Capture warm-up failed", exc_info=True)
+
+
 def _build_mcp() -> FastMCP:
     """Create the MCP server instance."""
     global _mcp, _control_notifier
@@ -342,6 +351,7 @@ def _build_mcp() -> FastMCP:
         controller.policy = _control_config.policy
         controller.idle_timeout_seconds = _control_config.idle_timeout_seconds
 
+        warm_up: asyncio.Future | None = None
         try:
             if controller.enabled:
                 control_overlay.start()
@@ -349,9 +359,14 @@ def _build_mcp() -> FastMCP:
             controller.start()
             if controller.enabled:
                 notifier.start()
+            # Warm the capture path in the background on the UIA worker, so the first
+            # Screenshot does not pay for loading dxcam and opening the DXGI camera.
+            warm_up = asyncio.ensure_future(_warm_up_capture(desktop))
             logger.debug("Server started, entering main loop")
             yield
         finally:
+            if warm_up is not None:
+                warm_up.cancel()
             await notifier.close()
             try:
                 controller.stop()

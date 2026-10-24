@@ -279,8 +279,10 @@ class TestDisplayFiltering:
         }
 
     def test_display_second_monitor_uses_matching_dxgi_output(self, desktop, monkeypatch):
+        import numpy
+
         fake_camera = MagicMock()
-        fake_camera.grab.return_value = [[[255, 255, 255]]]
+        fake_camera.grab.return_value = numpy.full((1080, 1920, 4), 255, dtype=numpy.uint8)
         fake_dxcam = MagicMock()
         fake_dxcam.create.return_value = fake_camera
 
@@ -315,20 +317,16 @@ class TestDisplayFiltering:
             ),
         )
         capture_rect = desktop.get_display_union_rect([1])
-        with patch(
-            "windows_mcp.desktop.screenshot.Image.fromarray",
-            return_value=Image.new("RGB", (1920, 1080), "white"),
-        ) as mock_fromarray:
-            screenshot = desktop.get_screenshot(capture_rect=capture_rect)
+        screenshot = desktop.get_screenshot(capture_rect=capture_rect)
 
         assert screenshot.size == (1920, 1080)
+        assert screenshot.getpixel((5, 5)) == (255, 255, 255)
         fake_dxcam.create.assert_called_once_with(
             device_idx=0,
             output_idx=1,
-            processor_backend="numpy",
+            output_color="BGRA",
         )
-        fake_camera.grab.assert_called_once_with(region=None, copy=True, new_frame_only=False)
-        mock_fromarray.assert_called_once()
+        fake_camera.grab.assert_called_once_with(copy=False, new_frame_only=False)
 
     def test_get_screenshot_falls_back_to_pillow_when_dxcam_region_is_unsupported(
         self, desktop, monkeypatch
