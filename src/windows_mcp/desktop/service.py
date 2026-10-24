@@ -936,26 +936,28 @@ class Desktop:
 
     def type(
         self,
-        loc: tuple[int, int],
+        loc: tuple[int, int] | None,
         text: str,
         caret_position: Literal["start", "idle", "end"] = "idle",
         clear: bool | str = False,
         press_enter: bool | str = False,
     ):
+        """Click ``loc`` (None: keep the current focus) and type ``text`` there."""
         clear = as_bool(clear, "clear")
         press_enter = as_bool(press_enter, "press_enter")
         owner = get_controller()
         owner.checkpoint_current()
-        x, y = loc
-        self._validate_screen_point(x, y)
-        click_guard.before_click(x, y, "left")
-        uia.Click(x, y)
-        click_guard.after_click(x, y, "left")
-        owner.record_step_current()
-        # The keys are queued behind the click, so they cannot overtake it; what can
-        # go wrong is typing while the clicked window is still being activated.
-        # Poll for that (bounded) instead of the old blind 0.5 s sleep.
-        wait_for_foreground_at(x, y)
+        if loc is not None:
+            x, y = loc
+            self._validate_screen_point(x, y)
+            click_guard.before_click(x, y, "left")
+            uia.Click(x, y)
+            click_guard.after_click(x, y, "left")
+            owner.record_step_current()
+            # The keys are queued behind the click, so they cannot overtake it; what can
+            # go wrong is typing while the clicked window is still being activated.
+            # Poll for that (bounded) instead of the old blind 0.5 s sleep.
+            wait_for_foreground_at(x, y)
         if caret_position == "start":
             owner.checkpoint_current()
             uia.SendKeys("{Home}", waitTime=0.05)

@@ -48,8 +48,9 @@ per-app recipes when an app is unfamiliar.
 text=...). 'File > Save As' clicks a menu path. If a target does not resolve you get the top \
 candidates back: pick one of their names or coordinates. Use Snapshot only when you truly \
 need to look; never guess coordinates.
-4. After launching an app, its window may need a moment: use WaitFor(condition=active_window, \
-window_name=...) before typing into it if the next step depends on it.
+4. Actions return when the UI is ready: App launch waits for its window, Type(press_enter) and \
+Shortcut wait for the page load or dialog they start and say so. Never call Wait after them; \
+use WaitFor(condition=..., text=...) only for something specific that comes later.
 5. Finish with Done(answer, success, expect). expect describes what should be true if you \
 succeeded, in terms visible in an accessibility snapshot (a focused window title, a value in \
 a display field, an element name); it is checked automatically, so call Done in the same turn as your last \

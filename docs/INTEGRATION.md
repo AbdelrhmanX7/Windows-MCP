@@ -104,10 +104,10 @@ to run concurrently.
 | `Scrape` | background | Fetch a web page as markdown (SSRF-protected). |
 | `DisplayInventory` | background | Monitors, work areas, DPI. |
 | `Click` | screen | Click at `loc`, a Snapshot `label`, or `target="Save button"` / `"File > Save As"` (resolved in-server, no Snapshot needed). |
-| `Type` | screen | Type into `loc`/`label`/`target="search box"`; `clear`, `press_enter`. |
+| `Type` | screen | Type into `loc`/`label`/`target="search box"`, or into the focused element when none is given; `clear`, `press_enter`. |
 | `Scroll`, `Move`, `Shortcut` | screen | Scroll, move or drag, key chords like `ctrl+s`. |
 | `MultiSelect`, `MultiEdit` | screen | Batch clicks / batch field entry. |
-| `Wait` | background* | Sleep N seconds. *Put it in `lane="screen"` when it sequences screen steps. |
+| `Wait` | background* | Rarely needed: actions already return when the UI is ready. Waits up to N seconds but returns after 0.1 s when nothing is loading or changing. *Put it in `lane="screen"` when it sequences screen steps. |
 | `WaitFor` | background | Poll until text, a window or an element appears (one call instead of a loop). |
 | `App` | `launch`/`launch_executable`: background*; `switch`/`resize`: screen | Launch by Start Menu name or exact exe; focus or resize windows. *A launch steals focus: put it in `lane="screen"` when a later screen call depends on it. |
 | `PowerShell` | background | Run a command. Use it for URIs (`Start-Process 'spotify:'`), COM and APIs. |
@@ -120,6 +120,16 @@ to run concurrently.
 | `Context` | background | Where the user is: foreground window, browser URL/domain, focused field (`is_password`), email recipients, plus the scam-guard verdict. A few ms. |
 | `CheckLink` | background | Local phishing/lookalike check of a URL, domain or email address (or a list); sub-millisecond. |
 | `Apps` / `AppSkill` | background; `AppSkill(generate/regenerate=true)`: screen | Available. Per-app skills (URI schemes, CLI/COM recipes, known shortcuts) so the planner can do common app actions without UI exploration. |
+
+**Actions return when the UI is ready.** `Click`, `Type(press_enter=true)`, `Shortcut` and
+`App` launch wait (bounded by `WINDOWS_MCP_READY_TIMEOUT`, default 3 s, polling every 30 ms)
+for what they started: a browser page load (Edge/Chrome reload button in its "Stop" state, the
+document's `busy`), a dialog or window taking the foreground, a title change. The result says
+what happened, e.g. `Typed ... Enter pressed. Page loaded: "todo list - Search" (0.8 s).` or
+`Pressed ctrl+s. Window "Save As" is now in front (0.1 s).` When nothing changed they return
+after one sample (about 1 ms), so plain typing is not slowed down. The planner should not
+call `Wait` after an action; `Wait` itself returns "UI already idle" after 0.1 s when nothing
+is in flight.
 
 `Click(target=...)`, `Type(target=...)` and `Locate` (the click resolver) are available on
 `main`. Below the confidence threshold (`WINDOWS_MCP_RESOLVER_MIN_CONFIDENCE`, default 0.7)
@@ -354,18 +364,21 @@ tool turns as possible.
    context (exact text, file names). Do not use Do for one-step actions, for anything
    that needs your judgment between steps, or when a URI/PowerShell route does it in one call.
 5. For UI steps, act by name: Click(target="Save button"), Type(target="search box",
-   text=...), "File > Save As" paths. Use Locate to check a target without clicking. Use
-   WaitFor instead of repeated screenshots. Take a Screenshot only when you are unsure what
-   is on screen; use Snapshot only when you need element labels.
-6. After each RunParallel, call Tasks(mode="next") only if the next step is not obvious.
+   text=...), "File > Save As" paths. Type with no loc/target types into the focused field
+   (Shortcut ctrl+l, then Type(text=url, press_enter=true)). Use Locate to check a target
+   without clicking. Take a Screenshot only when you are unsure what is on screen; use
+   Snapshot only when you need element labels.
+6. Do not call Wait after an action. Click, Type(press_enter), Shortcut and App already return
+   when the page has loaded or the dialog is open, and their result says so ("Page loaded:
+   ...", "Window "Save As" is now in front"). Use WaitFor only for a specific later condition
+   (text_exists, active_window, element_exists) instead of Wait or repeated screenshots.
+7. After each RunParallel, call Tasks(mode="next") only if the next step is not obvious.
    Retry a failed task once with a different route, then mark it failed with a clear error.
-6. When the plan is done, reply to the user in one or two sentences.
-7. Before opening a link or emailing an address you did not get from the user, run
+8. Before opening a link or emailing an address you did not get from the user, run
    CheckLink on it. If a tool fails with SCAM_GUARD_CONFIRM_REQUIRED, stop, tell the user
    what was detected (domain, brand, reasons) and retry with confirmed=true only after they
    explicitly say to go ahead.
-
-7. When the plan is done, reply to the user in one or two sentences.
+9. When the plan is done, reply to the user in one or two sentences.
 ```
 
 ## 8. Latency tips
@@ -379,7 +392,8 @@ tool turns as possible.
   `App(mode="launch_executable")` or `PowerShell Start-Process '<uri>'` skips that.
 - **Use `Screenshot`, not `Snapshot`, to look.** Snapshot walks the accessibility tree. Use
   `Click(target=...)` instead of Snapshot plus a label.
-- **Use `WaitFor`, not polling,** when an app needs time to appear.
+- **Don't `Wait` after actions.** They return when the UI is ready. Use `WaitFor`, not polling,
+  for a specific condition.
 - **Keep `--control` on and the policy `relaxed`.** `--no-control` serializes every tool, and `balanced`/`strict` serialize more of them.
 - **Use stateless HTTP only with the webhook.** Pushed events need a session.
 

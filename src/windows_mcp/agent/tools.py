@@ -87,7 +87,12 @@ INNER_TOOLS: dict[str, ToolSpec] = {
             }
         ),
     ),
-    "Wait": ToolSpec("Wait", "Sleep whole seconds (1-5).", _obj({"duration": _I}, ["duration"])),
+    "Wait": ToolSpec(
+        "Wait",
+        "Rarely needed (actions already wait for readiness). Up to 1-5 s; returns early "
+        "when nothing is loading.",
+        _obj({"duration": _I}, ["duration"]),
+    ),
     "WaitFor": ToolSpec(
         "WaitFor",
         "Wait until a condition holds: text_exists, active_window, element_exists "
