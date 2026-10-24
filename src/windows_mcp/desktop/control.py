@@ -486,14 +486,20 @@ class ControlCoordinator:
                 self._emergency = False
                 self._fast_takeover = False
                 self._fast_pending = False
-                self._last_user = time.monotonic()
-                changed = self._set_locked("user")
+                # A fault is not proof of user input (e.g. an indicator heartbeat
+                # stall, #465). Only recent physical input reopens into `user`.
+                now = time.monotonic()
+                stamp = self._last_physical_event
+                recent = stamp > 0 and now - stamp < self.idle_timeout_seconds
+                if recent:
+                    self._last_user = stamp
+                changed = self._set_locked("user" if recent else "ready")
                 if not current():
                     self._emergency = True
                     self._set_locked("unavailable")
                     self.input_ledger.block_new()
                     return
-                result = self._snapshot_locked(self._last_user)
+                result = self._snapshot_locked(now)
         except Exception:
             return  # A failed release or health check keeps control unavailable.
         if changed:

@@ -176,7 +176,7 @@ def test_recovery_cannot_clear_new_fault_or_stop(monkeypatch, interruption):
 
         def interrupt_state(state):
             changed = change_state(state)
-            if state == "user":
+            if state == "ready":
                 owner._fail_open()
             return changed
 
@@ -195,8 +195,38 @@ def test_successful_recovery_requires_current_completed_installation():
     owner._rehook_completed = fault
     owner._recover_after_rehook(fault, healthy=True, sampled_at=control.time.monotonic())
     assert not owner._emergency
-    assert owner._state == "user"
+    assert owner._state == "ready"
     assert not owner._suppress
+
+
+def test_recovery_without_physical_input_reopens_ready():
+    """An indicator heartbeat stall is not user input and must not report USER_CONTROL (#465)."""
+    owner = control.ControlCoordinator()
+    with owner._lock:
+        owner._set_locked("ready")
+    owner.begin_call("Screenshot")
+    owner._fail_open()  # e.g. the watchdog saw a stale indicator heartbeat.
+    fault = owner._fault_token
+    owner._rehook_completed = fault
+    owner._recover_after_rehook(fault, healthy=True, sampled_at=control.time.monotonic())
+    status = owner.status()
+    assert status["state"] == "ready"
+    assert status["wait_seconds"] == 0.0
+    assert owner._last_user == 0.0
+
+
+def test_recovery_after_recent_physical_input_reopens_user():
+    owner = control.ControlCoordinator()
+    owner._fail_open()
+    fault = owner._fault_token
+    owner._rehook_completed = fault
+    stamp = control.time.monotonic() - 2.0
+    owner._last_physical_event = stamp
+    owner._recover_after_rehook(fault, healthy=True, sampled_at=control.time.monotonic())
+    status = owner.status()
+    assert status["state"] == "user"
+    assert owner._last_user == stamp
+    assert 0 < status["wait_seconds"] <= owner.idle_timeout_seconds - 2.0
 
 
 def test_fault_during_health_probe_invalidates_completed_rehook(monkeypatch):
@@ -296,7 +326,7 @@ def test_health_expiring_during_recovery_keeps_input_blocked(monkeypatch, delay_
 
         def slow_state(state):
             changed = set_state(state)
-            if state == "user":
+            if state == "ready":
                 clock[0] += 0.25
             return changed
 
