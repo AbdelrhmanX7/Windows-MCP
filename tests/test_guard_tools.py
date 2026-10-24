@@ -187,5 +187,6 @@ def test_input_tools_advertise_confirmed():
     tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
     for name in ("Type", "Click", "Shortcut", "MultiEdit"):
         assert "confirmed" in tools[name].parameters["properties"], name
-    assert tools["Context"].annotations.readOnlyHint
-    assert tools["CheckLink"].annotations.readOnlyHint
+    for name in ("Context", "CheckLink"):
+        dumped = tools[name].annotations.model_dump()
+        assert dumped.get("read_only_hint", dumped.get("readOnlyHint")) is True
