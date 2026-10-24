@@ -731,6 +731,20 @@ A window is excluded *before* any UI Automation call is made against it, so its 
 
 This is an exclusion mechanism — a mitigation, not a complete fix for every form of [#383](https://github.com/CursorTouch/Windows-MCP/issues/383). It only skips the processes you name; a pathological window you have not listed can still stall a capture.
 
+### MCP host windows and per-window budgets
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_SKIP_HOST_PROCESSES` | `on` | Skip windows owned by the processes that launched Windows-MCP (the MCP host, such as VS Code, Cursor or Claude Desktop). Set to `0`, `false`, `no` or `off` to traverse them. |
+| `WINDOWS_MCP_WINDOW_TIME_BUDGET_SEC` | `10` | Seconds a single window's tree walk may take. When it runs out, Windows-MCP keeps the elements found so far in that window and moves on to the next one. `0` disables the budget. Invalid or negative values use the default. |
+| `WINDOWS_MCP_MAX_WINDOW_ELEMENTS` | _(no cap)_ | Most elements a single window may contribute, so one huge window cannot use the whole `WINDOWS_MCP_MAX_TREE_ELEMENTS` budget. Unset, `0` or invalid means no per-window cap. |
+
+By default, Windows-MCP does not walk the accessibility tree of the application that launched it. Walking an Electron host's own renderer from inside it can hang the host (seen with VS Code, #383), and Windows then closes it along with every session inside. To find the host, Windows-MCP follows its parent processes up to the first one that owns a visible window, which is the host. Whatever launched the host, such as a browser that opened a `vscode://` link, is still captured. The walk never goes past `explorer.exe` or a system process, so the taskbar, the desktop and File Explorer are always captured. The skipped process names are logged once at startup. Host windows are left out of the tree, but they still appear in the window list. They are not reported as failed captures.
+
+The per-window budgets limit how much time and how many elements one slow or very large window can use. A window that hits its budget returns a partial tree, and every other window is still captured. A window cut short this way is logged as a warning. It does not add the truncation note that `WINDOWS_MCP_MAX_TREE_ELEMENTS` adds.
+
+If your MCP client runs inside Electron and you want to automate its windows too, launch it with Chromium's `--disable-renderer-accessibility` flag (e.g. `code --disable-renderer-accessibility`). The client then stops answering deep UI Automation queries into its web content, which avoids the hang, at the cost of screen-reader support in that app.
+
 ### UI Automation timeouts
 
 | Variable | Default | Description |
