@@ -277,6 +277,7 @@ def register(mcp, *, get_desktop, get_analytics, runtime: TaskRuntime | None = N
                 timeout=timeout,
                 stop_screen_on_error=stop,
                 max_result_chars=max(200, min(max_result_chars, 50000)),
+                screen_lock=rt().screen_lock,
             )
         except TaskError as exc:
             raise ValueError(str(exc)) from None

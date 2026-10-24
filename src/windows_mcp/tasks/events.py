@@ -134,6 +134,20 @@ class TaskEventBus:
                 except ValueError:
                     pass
 
+    async def wait_drained(self, session: Any, timeout: float = 0.5) -> None:
+        """Wait (bounded) until events queued for *session*'s connection are sent.
+
+        On the modern protocol a log message may only ride the stream of the request that
+        is still open, so the request must not finish while its events are still queued.
+        """
+        with self._lock:
+            entry = self._sessions.get(id(_connection_of(session)))
+        if entry is None:
+            return
+        deadline = time.monotonic() + timeout
+        while (entry.pending or entry.draining) and time.monotonic() < deadline:
+            await asyncio.sleep(0.002)
+
     def session_count(self) -> int:
         with self._lock:
             return len(self._sessions)

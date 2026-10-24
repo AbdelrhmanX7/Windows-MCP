@@ -131,6 +131,12 @@ class OrchestrationMiddleware(Middleware):
         try:
             return await self._call_tool(context, call_next)
         finally:
+            # Events the tool published are already queued (their call_soon_threadsafe
+            # callbacks ran before the worker thread's completion). Let them reach the
+            # client while this request's stream is still open.
+            session = self._session(context)
+            if session is not None:
+                await self.runtime.bus.wait_drained(session)
             self._remember(context, active=False)
 
     async def _call_tool(self, context: MiddlewareContext, call_next: Callable) -> Any:

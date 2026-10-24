@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from windows_mcp.tasks.screen_lock import ScreenLockTimeout
 from windows_mcp.tasks.store import TaskError, TaskStore
 
 DEFAULT_MAX_CONCURRENCY = 4
@@ -210,8 +211,11 @@ async def run_parallel(
     timeout: float | None = None,
     stop_screen_on_error: bool = True,
     max_result_chars: int = 4000,
+    screen_lock: Any = None,
 ) -> dict:
     """Run *calls*; returns a summary dict with per-call results in input order."""
+    from windows_mcp.tools.control_policy import is_screen_call
+
     max_concurrency = max(1, min(16, max_concurrency or default_max_concurrency()))
     timeout = timeout if timeout and timeout > 0 else default_timeout()
     linker = _TaskLinker(store, calls)
@@ -230,12 +234,23 @@ async def run_parallel(
                 # Background calls: the timeout stops waiting, but a tool already running in a
                 # worker thread finishes on its own; its result is discarded.
                 result = await asyncio.wait_for(call_tool(call.tool, call.args), timeout)
+            elif screen_lock is not None and not is_screen_call(call.tool, call.args):
+                # Opted into the screen lane (e.g. an App launch before a Type): the
+                # middleware does not lock it, so hold the screen lock here. A concurrent
+                # request's Click cannot land between this launch and the next Type.
+                await screen_lock.acquire(call.tool)
+                try:
+                    result = await call_tool(call.tool, call.args)
+                finally:
+                    screen_lock.release()
             else:
                 # Screen calls: never abandon a call mid-input (the screen lock would be
                 # released while keys are still being sent); the lock wait has its own timeout.
                 result = await call_tool(call.tool, call.args)
             call.status = "ok"
             call.result = result_text(result, max_result_chars)
+        except ScreenLockTimeout as exc:
+            call.status, call.error = "error", str(exc)
         except asyncio.TimeoutError:
             call.status, call.error = "timeout", f"timed out after {timeout:g}s"
         except Exception as exc:  # ToolError, NotFoundError, ValidationError, ...

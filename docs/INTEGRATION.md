@@ -61,8 +61,11 @@ Clients connect to `https://<host>:8000/mcp/` with `Authorization: Bearer <key>`
 | `--control-policy relaxed\|balanced\|strict` | | Which tools wait for desktop ownership (default `relaxed`: only direct input). |
 | `--control-idle-timeout` | | Seconds of user inactivity before AI control resumes after a user takeover (default 10). |
 
-**Keep `--control` on (the default) if you want parallelism.** With `--no-control` the
-gate serializes every tool call, so `RunParallel` background calls run one at a time.
+**Keep `--control` on with `--control-policy relaxed` (both defaults) if you want
+parallelism.** With `--no-control` the gate serializes every tool call. With `balanced`,
+PowerShell, Notification, App launch, Process kill and Clipboard set each take the gate's
+desktop lock. With `strict`, every call does. Under those settings, the affected
+`RunParallel` background calls run one at a time.
 
 ### Receiving pushed events
 
@@ -73,7 +76,8 @@ logger `windows-mcp.tasks`, `data` = the event object). On FastMCP 4 clients:
   changes made between requests.
 - On the 2026-07-28 protocol era, the spec only allows log messages on the stream of an
   in-flight request. Events emitted while a request runs (every `Tasks` call, and every
-  per-call update inside a long `RunParallel`) ride that request's stream. Events emitted
+  per-call update inside a long `RunParallel`) ride that request's stream. The server
+  sends them before the response. Events emitted
   between requests are not delivered. Use the webhook or poll `Tasks(mode="events")` if you
   need those.
 
@@ -297,7 +301,8 @@ whose `seq` is lower than the stored one.
   worker thread finishes on its own, and its result is discarded.
 - **Screen lane:** the DIRECT tools plus App `switch`/`resize`, and any call with
   `lane="screen"`. These run in order, concurrently with the background lane, and each one
-  goes through the screen lock. Screen calls are never timed out mid-input. If a screen call
+  holds the screen lock while it runs (a `lane="screen"` App launch or Wait too, so a
+  concurrent request's Click cannot land between "launch Notepad" and "Type"). Screen calls are never timed out mid-input. If a screen call
   fails, the remaining screen calls are `skipped` (set `stop_screen_on_error=false` to keep
   going). `lane="background"` on a screen tool is ignored.
 - **Safety is unchanged.** Every inner call is dispatched through FastMCP's own `call_tool`,
@@ -360,5 +365,5 @@ tool turns as possible.
 - **Use `Screenshot`, not `Snapshot`, to look.** Snapshot walks the accessibility tree. Use
   `Click(target=...)` instead of Snapshot plus a label.
 - **Use `WaitFor`, not polling,** when an app needs time to appear.
-- **Keep `--control` on.** `--no-control` serializes every tool and removes parallelism.
+- **Keep `--control` on and the policy `relaxed`.** `--no-control` serializes every tool, and `balanced`/`strict` serialize more of them.
 - **Use stateless HTTP only with the webhook.** Pushed events need a session.

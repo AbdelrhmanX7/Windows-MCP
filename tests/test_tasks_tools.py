@@ -463,3 +463,48 @@ async def test_events_ride_the_in_flight_request_on_modern_protocol():
             await asyncio.sleep(0.02)
     statuses = [e["status"] for e in received if e["type"] == "task_event"]
     assert "running" in statuses and "done" in statuses
+
+
+@pytest.mark.asyncio
+async def test_all_events_of_a_tasks_call_arrive_on_modern_protocol():
+    """A plan publishes several events from a worker thread; none may be lost at response time."""
+    mcp, _, _ = build()
+    received = []
+
+    async def on_log(message):
+        if message.logger == "windows-mcp.tasks":
+            received.append(message.data)
+
+    async with Client(mcp, log_handler=on_log) as client:
+        for round_ in range(3):
+            received.clear()
+            await client.call_tool(
+                "Tasks",
+                {"mode": "plan", "tasks": [{"title": f"task {i}"} for i in range(4)]},
+            )
+            assert [e["type"] for e in received] == ["plan_event"] + ["task_event"] * 4, round_
+
+
+@pytest.mark.asyncio
+async def test_forced_screen_lane_call_holds_the_screen_lock():
+    """A lane='screen' Wait/App launch keeps concurrent screen requests out until it ends."""
+    lock = ScreenLock()
+    mcp, _, probe = build(lock=lock)
+    async with Client(mcp) as client:
+        batch = asyncio.create_task(
+            client.call_tool(
+                "RunParallel",
+                {
+                    "calls": [
+                        {"tool": "Wait", "args": {"label": "w", "delay": 0.3}, "lane": "screen"}
+                    ]
+                },
+            )
+        )
+        await asyncio.sleep(0.1)
+        assert lock.status()["holder"] == "Wait"
+        await client.call_tool("Click", {"label": "outside", "delay": 0})
+        await batch
+    spans = {s[0]: s for s in probe.spans}
+    assert spans["Click:outside"][1] >= spans["Wait:w"][2]  # Click waited for the Wait.
+    assert not lock.locked
