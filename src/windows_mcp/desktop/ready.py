@@ -313,7 +313,10 @@ class Readiness:
         watch_end = start + watch
         stable_for = 0.0 if launched else STABLE_S
         cur = self.sample()
-        busy = cur.loading and not launched
+        # A load already running before the action (a start page, a slow tab) was not
+        # started by it: window shortcuts such as win+up must not wait for it.
+        ignore_loading = launched or before.loading
+        busy = cur.loading and not ignore_loading
         changed = launched or busy or not cur.same_window(before)
         saw_loading = busy
         last, last_change = cur, start
@@ -338,7 +341,7 @@ class Readiness:
                 checkpoint()
             self._sleep(min(POLL_S, max(0.0, deadline - now)))
             cur = self.sample(changed and cur.browser and not launched)
-            busy = cur.loading and not launched
+            busy = cur.loading and not ignore_loading
             if busy:
                 saw_loading = True
                 if committed_at is None and cur.browser and cur.title != before.title:

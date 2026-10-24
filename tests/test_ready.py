@@ -129,6 +129,12 @@ class TestAfter:
         assert settled.note.startswith('Page shown: "todo - Search')
         assert 1.1 <= settled.elapsed < 1.2
 
+    def test_load_already_running_before_the_action_is_not_waited_for(self):
+        clock = Clock()
+        loading = Sample(hwnd=1, title=EDGE.title, browser=True, loading=True)
+        assert make(clock, [(0, loading)]).after(loading) is None
+        assert clock.slept == []
+
     def test_disabled(self):
         clock = Clock()
         r = make(clock, [(0, EDGE)], timeout=0.0)
@@ -253,8 +259,9 @@ def test_type_still_rejects_a_bad_location(tools):
         asyncio.run(registered["Type"](text="x", loc=[1, 2, 3]))
 
 
-def test_type_enter_reports_page_load(tools):
+def test_type_enter_reports_page_load(tools, monkeypatch):
     registered, _, holder, _ = tools
+    monkeypatch.setattr(input_tools.readiness, "before", lambda: EDGE)
     loading = Sample(hwnd=1, title=EDGE.title, browser=True, loading=True)
     holder["events"] = [(0, loading), (0.5, Sample(hwnd=1, title="Bing", browser=True))]
     result = asyncio.run(registered["Type"](text="q", loc=[10, 10], press_enter=True))
