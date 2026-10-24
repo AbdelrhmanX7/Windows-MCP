@@ -65,6 +65,12 @@ def normalize_shortcut(shortcut: str) -> str:
     return "+".join(mods + rest)
 
 
+# Only the browser's own address bar, never page fields like "Email address".
+_ADDRESS_TARGET = re.compile(
+    r"\baddress (and search )?bar\b|\burl bar\b|\bomnibox\b|\blocation bar\b"
+    r"|search or enter address",
+    re.I,
+)
 _RISKY_NORMALIZED = frozenset(normalize_shortcut(s) for s in RISKY_SHORTCUTS)
 
 
@@ -224,6 +230,8 @@ class GuardService:
     def gated_call(name: str, arguments: dict | None) -> bool:
         """Would this call type into / submit / send the foreground page or message?"""
         args = arguments or {}
+        if name == "Type" and _ADDRESS_TARGET.search(str(args.get("target") or "")):
+            return False  # Typing a new address is how the user leaves a flagged page.
         if name in TYPING_TOOLS:
             return True
         if name == "Click":
@@ -232,11 +240,13 @@ class GuardService:
             return normalize_shortcut(str(args.get("shortcut", ""))) in _RISKY_NORMALIZED
         return False
 
-    def risk_for_input(self) -> dict | None:
+    def risk_for_input(self, name: str | None = None) -> dict | None:
         """A refusal payload when input into the current context needs user confirmation."""
         ctx, verdict, source, recipient = self.current()
         if verdict is None or ctx is None:
             return None
+        if name == "Shortcut" and (ctx.get("focused") or {}).get("address_bar"):
+            return None  # Enter / paste in the address bar navigates away; not page input.
         password = bool((ctx.get("focused") or {}).get("is_password"))
         risky = verdict.verdict == "dangerous" or (
             verdict.verdict == "suspicious" and (password or source == "email")

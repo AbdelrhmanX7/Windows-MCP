@@ -282,6 +282,9 @@ def test_safe_and_unknown_pages_never_call_the_model():
         ("Shortcut", {"shortcut": "Enter"}, True),
         ("Shortcut", {"shortcut": "ctrl+t"}, False),
         ("Shortcut", {"shortcut": "alt+tab"}, False),
+        ("Type", {"text": "github.com", "target": "Address and search bar"}, False),
+        ("Type", {"text": "github.com", "target": "address bar"}, False),
+        ("Type", {"text": "me@x.com", "target": "Email address"}, True),
         ("Scroll", {}, False),
         ("Screenshot", {}, False),
     ],
@@ -322,3 +325,14 @@ def test_override_event():
     svc.evaluate(ctx("https://rnicorsoft.com/"))
     svc.publish_override("Type", svc.risk_for_input())
     assert events[-1]["event"] == "user_confirmed" and events[-1]["tool"] == "Type"
+
+
+def test_shortcut_in_address_bar_is_not_page_input():
+    svc = GuardService(publish=None, model=disabled_model())
+    c = ctx("https://rnicorsoft.com/")
+    svc.evaluate(c)
+    assert svc.risk_for_input("Shortcut") is not None
+    c["focused"] = {"name": "Address and search bar", "address_bar": True}
+    svc.evaluate(c)
+    assert svc.risk_for_input("Shortcut") is None
+    assert svc.risk_for_input("Type") is not None

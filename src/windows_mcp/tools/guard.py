@@ -131,7 +131,7 @@ class GuardGate(Middleware):
             await self._refresh(service)
         except Exception:
             logger.debug("guard refresh failed; using cached state", exc_info=True)
-        risk = service.risk_for_input()
+        risk = service.risk_for_input(name)
         if risk is not None:
             if GuardService.confirmed(arguments):
                 service.publish_override(name, risk)
