@@ -10,6 +10,7 @@ from windows_mcp.tree.service import (
     Tree,
     _excluded_process_names,
     _is_comtypes_variant_ord_typeerror,
+    _merge_unspaced_word_runs,
     _window_process_name,
 )
 from windows_mcp.tree.views import BoundingBox, SemanticNode
@@ -787,3 +788,85 @@ class TestProcessExclusion:
 
         assert traversed == [200]
         assert tree_instance.element_budget.count == 1
+
+
+def _word_run(words: list[str], left: int = 100, top: int = 0, gap: int = 0, glyph: int = 16):
+    """Lay `words` out left-to-right on one line, `glyph` px per character."""
+    elements = []
+    for word in words:
+        right = left + glyph * len(word)
+        elements.append((word, Rect(left, top, right, top + 16)))
+        left = right + gap
+    return elements
+
+
+def _as_tuples(elements):
+    return [(word, (r.left, r.top, r.right, r.bottom)) for word, r in elements]
+
+
+class TestMergeUnspacedWordRuns:
+    """#495: Chromium/Electron expose one UIA word range per CJK glyph."""
+
+    def test_cjk_glyphs_and_trailing_punctuation_merge_into_one_run(self):
+        merged = _merge_unspaced_word_runs(_word_run(["基", "本", "设", "置", "。"]))
+        assert _as_tuples(merged) == [("基本设置。", (100, 0, 180, 16))]
+
+    def test_latin_words_are_left_unchanged(self):
+        elements = _word_run(["Hello", "world", "."])
+        assert _as_tuples(_merge_unspaced_word_runs(elements)) == _as_tuples(elements)
+
+    def test_cjk_followed_by_latin_stays_split(self):
+        merged = _merge_unspaced_word_runs(_word_run(["中", "文", "abc"]))
+        assert [word for word, _ in merged] == ["中文", "abc"]
+
+    def test_opening_punctuation_joins_cjk(self):
+        merged = _merge_unspaced_word_runs(_word_run(["(", "中", ")"]))
+        assert [word for word, _ in merged] == ["(中)"]
+
+    def test_separate_lines_are_not_joined(self):
+        elements = _word_run(["中", "文"]) + _word_run(["下", "行"], top=30)
+        merged = _merge_unspaced_word_runs(elements)
+        assert _as_tuples(merged) == [
+            ("中文", (100, 0, 132, 16)),
+            ("下行", (100, 30, 132, 46)),
+        ]
+
+    def test_wrapped_word_boxes_on_different_lines_stay_separate(self):
+        elements = [("中文", Rect(300, 0, 332, 16)), ("中文", Rect(0, 20, 16, 36))]
+        assert len(_merge_unspaced_word_runs(elements)) == 2
+
+    def test_distant_glyphs_on_the_same_line_stay_separate(self):
+        merged = _merge_unspaced_word_runs(_word_run(["中", "文"], gap=20))
+        assert [word for word, _ in merged] == ["中", "文"]
+
+    def test_input_rects_are_not_mutated(self):
+        elements = _word_run(["中", "文"])
+        before = _as_tuples(elements)
+        _merge_unspaced_word_runs(elements)
+        assert _as_tuples(elements) == before
+
+
+class TestAppendWordNodes:
+    def test_cjk_run_becomes_a_single_word_node(self, tree_instance):
+        semantic_root = SemanticNode(
+            control_type="Document",
+            element_type="interactive",
+            name="Settings",
+            window_name="App",
+        )
+        interactive_nodes = []
+
+        tree_instance._append_word_nodes(
+            _word_run(["基", "本", "设", "置"]) + _word_run(["Save"], left=200),
+            Rect(0, 0, 500, 500),
+            "App",
+            interactive_nodes,
+            semantic_root,
+        )
+
+        assert [node.name for node in interactive_nodes] == ["基本设置", "Save"]
+        box = interactive_nodes[0].bounding_box
+        assert (box.left, box.top, box.right, box.bottom) == (100, 0, 164, 16)
+        assert [child.name for child in semantic_root.children] == ["基本设置", "Save"]
+        assert all(child.control_type == "Word" for child in semantic_root.children)
+        assert tree_instance.element_budget.count == 2

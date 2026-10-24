@@ -15,6 +15,8 @@ from time import sleep,perf_counter
 from _ctypes import COMError
 from psutil import Process
 import logging
+import re
+import unicodedata
 import weakref
 import win32process
 import os
@@ -94,6 +96,76 @@ def _runtime_identity(node: Any) -> Optional[tuple[int, ...]]:
     except (TypeError, ValueError, COMError):
         return None
     return parts or None
+
+
+# Scripts written without spaces between words. UIA's TextUnit.Word yields one range per glyph
+# for these, so an Electron/Chromium document would otherwise emit one `Word` node per character.
+_UNSPACED_SCRIPT_RE = re.compile(
+    "[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f"
+    "\U00020000-\U0003134f]"
+)
+
+
+def _is_unspaced_char(char: str) -> bool:
+    return _UNSPACED_SCRIPT_RE.match(char) is not None
+
+
+def _is_punctuation_char(char: str) -> bool:
+    return unicodedata.category(char).startswith("P")
+
+
+def _should_join_words(prev_word: str, prev_rect: Rect, word: str, rect: Rect) -> bool:
+    """Return True when `word` continues the unspaced (CJK/kana) run ending in `prev_word`."""
+    tail, head = prev_word[-1], word[0]
+    if not (_is_unspaced_char(tail) or _is_unspaced_char(head)):
+        return False
+    if not (_is_unspaced_char(tail) or _is_punctuation_char(tail)):
+        return False
+    if not (_is_unspaced_char(head) or _is_punctuation_char(head)):
+        return False
+    min_height = min(prev_rect.height(), rect.height())
+    if min_height <= 0:
+        return False
+    # Same visual line: the boxes overlap vertically by at least half the shorter one.
+    overlap = min(prev_rect.bottom, rect.bottom) - max(prev_rect.top, rect.top)
+    if overlap * 2 < min_height:
+        return False
+    # Horizontally adjacent (glyphs abut); symmetric so RTL-ordered ranges also join.
+    gap = max(rect.left - prev_rect.right, prev_rect.left - rect.right)
+    return gap <= max(2, min_height // 2)
+
+
+def _merge_unspaced_word_runs(word_elements: list[tuple[str, Rect]]) -> list[tuple[str, Rect]]:
+    """Collapse per-glyph word ranges of unspaced scripts into one entry per visual run.
+
+    Adjacent CJK/kana glyphs on the same line (and punctuation touching them) are joined into a
+    single word whose rect is the union of the parts. Text in spaced scripts (Latin, Cyrillic,
+    Hangul, ...) is returned unchanged, so per-word click targets are kept there.
+
+    Args:
+        word_elements: (word, rect) pairs in document order, as built from
+            `GetAllWordBoundingBoxes`.
+
+    Returns:
+        A new list of (word, rect) pairs; the input rects are not mutated.
+    """
+    merged: list[tuple[str, Rect]] = []
+    for word, rect in word_elements:
+        if merged and word:
+            prev_word, prev_rect = merged[-1]
+            if prev_word and _should_join_words(prev_word, prev_rect, word, rect):
+                merged[-1] = (
+                    prev_word + word,
+                    Rect(
+                        min(prev_rect.left, rect.left),
+                        min(prev_rect.top, rect.top),
+                        max(prev_rect.right, rect.right),
+                        max(prev_rect.bottom, rect.bottom),
+                    ),
+                )
+                continue
+        merged.append((word, rect))
+    return merged
 
 if TYPE_CHECKING:
     from windows_mcp.desktop.service import Desktop
@@ -334,8 +406,12 @@ class Tree:
 
     def _append_word_nodes(self, word_elements:list[tuple[str,Rect]], reference_box:Rect, window_name:str,
                             target_nodes:list[TreeElementNode], current_semantic_node:'Optional[SemanticNode]'=None):
-        """Append one interactive `TreeElementNode` (control_type='Word') per (word, rect) pair."""
-        for word, rect in word_elements:
+        """Append one interactive `TreeElementNode` (control_type='Word') per (word, rect) pair.
+
+        Per-glyph runs of unspaced scripts (CJK/kana) are merged first, see
+        `_merge_unspaced_word_runs`.
+        """
+        for word, rect in _merge_unspaced_word_runs(word_elements):
             if not self.element_budget.try_consume():
                 break
             bounding_box = self.iou_bounding_box(reference_box, rect)
