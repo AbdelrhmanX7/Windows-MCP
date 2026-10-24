@@ -387,7 +387,7 @@ arrive as `security_event`s on the same event bus as `task_event`s.
 | Piece | What it does | Cost |
 |---|---|---|
 | Local detector (`guard/detector.py`) | Registrable domain (bundled Public Suffix List, private section included, so `evil.github.io` is not `github.io`), IDN/punycode, IP literals, `user@host` and `host\@brand` tricks, confusable skeleton (`rn`→`m`, `vv`→`w`, `cl`→`d`, `0`→`o`, `1`→`l`, Cyrillic/Greek homoglyphs), edit distance to ~250 brands' labels, brand in a subdomain or hyphenated label, embedded real domain, risky TLDs and hosting suffixes, hyphens, http, password field, tech-support-scam text. Official brand domains are fast-pathed as safe. No network. | VM: first check of a host ~40–110 µs median (p95 190 µs), cached ~10 µs; suffix list + brands load once in ~12 ms at startup |
-| Watcher (`guard/watcher.py`) | Own UI Automation thread. Polls the foreground window/title (Win32) every 100 ms, the focused element every 300 ms and the address bar every 1.5 s, debounced; re-probes only on change. Reads page text only for pages that are not known-safe. | full probe 7–12 ms (focus ~1 ms, URL 0.1–0.3 ms from the cached address-bar element, page text 6–11 ms); event ~0.65–1.5 s after Edge launch |
+| Watcher (`guard/watcher.py`) | Own UI Automation thread. Polls the foreground window/title (Win32) every 100 ms, the focused element every 300 ms and the address bar every 1.5 s, debounced; re-probes only on change. Reads page text only for pages that are not known-safe. | full probe 8–16 ms on a non-safe page (focus ~1 ms, URL 0.1–0.3 ms from the cached address-bar element, page text 6–8 ms, password-box search ~6.5 ms); ~2 ms on a safe page; event ~0.6–1.5 s after Edge launch |
 | Second opinion (`guard/model.py`) | Microsoft-Decision-1 via OpenRouter, gray zone only (suspicious, or an unknown site with a password field or scam-like text). Runs in the background, cached per domain for 15 min, and can only raise severity. | ~300 ms warm, off the fast path |
 | Gate (`tools/guard.py` `GuardGate`) | Middleware between the orchestration layer and the control gate. | refusal in ~1.8 ms round trip; one probe only when the foreground window/tab changed |
 
@@ -401,7 +401,7 @@ arrive as `security_event`s on the same event bus as `task_event`s.
  "url": "https://rnicorsoft.com/login", "domain": "rnicorsoft.com",
  "focused": {"name": "Password", "control_type": "Edit", "is_password": true,
              "address_bar": false},
- "recipients": [], "page_text_chars": 412,
+ "recipients": [], "has_password_field": true, "page_text_chars": 412,
  "guard": {"verdict": "dangerous", "score": 100, "brand": "Microsoft",
            "reasons": ["'rnicorsoft' imitates 'microsoft' (look-alike characters)",
                        "asks for a password on a look-alike site"],
@@ -411,7 +411,7 @@ arrive as `security_event`s on the same event bus as `task_event`s.
 ```
 
 Measured on the Win10 VM with Edge: `cached: true` calls take 0.03–0.1 ms in the server
-(about 2 ms MCP round trip); `refresh=true` 8–13 ms. `cached: true` means the watcher's context was reused (same window and tab title, under 2 s
+(about 2 ms MCP round trip); `refresh=true` 14–16 ms on a non-safe page. `cached: true` means the watcher's context was reused (same window and tab title, under 2 s
 old). `app` is `browser`, `email` (Outlook classic `outlook.exe`, new Outlook `olk.exe`, or a
 webmail compose with recipients) or `other`. Page text is never returned, only its length.
 
@@ -428,7 +428,11 @@ away") is at most `suspicious`. `dangerous` needs look-alike characters or a sec
 ### Confirm before risky input
 
 These calls are refused with a `ToolError` while the current context is `dangerous`, or
-`suspicious` with a focused password field or an email recipient:
+`suspicious` with a password field or an email recipient. "Password field" means the focused
+element is a password box, the page shows one anywhere (`has_password_field`, checked on
+pages that are not known-safe), or the call's `target` names a password/passcode/PIN/OTP
+field. A lookalike page with a login form is therefore `dangerous` as soon as it loads,
+before anything is typed.
 
 - `Type`, `MultiEdit`
 - `Click(target=...)` (clicks by coordinates or label are not gated)
