@@ -100,6 +100,10 @@ class GuardService:
         self._recipient: str | None = None
         self._last_key: tuple | None = None
         self._last_risky = False
+        # Browser-tool (CDP) tab verdicts dedup on their own channel, so a background tab
+        # never flaps the desktop watcher's state or events.
+        self._tab_last_key: tuple | None = None
+        self._tab_last_risky = False
         self.events_mode = events_mode()
         self.evaluations = 0
 
@@ -244,9 +248,7 @@ class GuardService:
             return normalize_shortcut(str(args.get("shortcut", ""))) in _RISKY_NORMALIZED
         return False
 
-    def risk_for_input(
-        self, name: str | None = None, arguments: dict | None = None
-    ) -> dict | None:
+    def risk_for_input(self, name: str | None = None, arguments: dict | None = None) -> dict | None:
         """A refusal payload when input into the current context needs user confirmation."""
         ctx, verdict, source, recipient = self.current()
         if verdict is None or ctx is None:
@@ -259,6 +261,17 @@ class GuardService:
             or ctx.get("has_password_field")
             or _PASSWORD_TARGET.search(target)
         )
+        return self.risk_payload(verdict, source=source, recipient=recipient, password=password)
+
+    @staticmethod
+    def risk_payload(
+        verdict: Verdict,
+        *,
+        source: str | None,
+        recipient: str | None = None,
+        password: bool = False,
+    ) -> dict | None:
+        """The SCAM_GUARD_CONFIRM_REQUIRED payload for input into *verdict*, or None if fine."""
         risky = verdict.verdict == "dangerous" or (
             verdict.verdict == "suspicious" and (password or source == "email")
         )
@@ -282,6 +295,53 @@ class GuardService:
                 "confirmed=true."
             ),
         }
+
+    # ------------------------------------------------------------------ browser tool (CDP)
+    def observe_tab(
+        self,
+        url: str,
+        *,
+        title: str | None = None,
+        password: bool = False,
+        process: str | None = None,
+        emit: bool = True,
+    ) -> Verdict:
+        """Verdict for a page the Browser tool is driving over CDP (not the foreground).
+
+        Never touches the desktop context that ``Context``/``GuardGate`` read. Emits a
+        ``security_event`` (``via: "cdp"``) with its own dedup state, same ``risky``/``all``
+        rules as the watcher. A cached model second opinion is merged; a gray verdict with no
+        cached opinion submits one for the next visit.
+        """
+        verdict = check(url, password_field=password, title=title)
+        if verdict.gray and verdict.domain and self.model.enabled:
+            hit = self.model.cached(verdict.domain, "browser")
+            if hit is not None:
+                verdict = merge_model(verdict, hit)
+            else:
+                self.model.submit(verdict.domain, lambda _r: None, title=title, source="browser")
+        if emit and self._publish is not None:
+            key = (verdict.domain, verdict.verdict, (verdict.model or {}).get("choice"))
+            risky = verdict.verdict in ("suspicious", "dangerous")
+            with self._lock:
+                skip = key == self._tab_last_key or (
+                    self.events_mode == "risky" and not risky and not self._tab_last_risky
+                )
+                self._tab_last_key = key
+                if not skip:
+                    self._tab_last_risky = risky
+            if not skip:
+                ctx = {
+                    "url": url,
+                    "title": title,
+                    "app": "browser",
+                    "process": process,
+                    "has_password_field": password,
+                }
+                ev = self.event(ctx, verdict, "browser", None)
+                ev["via"] = "cdp"
+                self._publish(ev)
+        return verdict
 
     def publish_override(self, tool: str, risk: dict) -> None:
         """Record that a risky input went ahead with confirmed=true (audit trail for the UI)."""

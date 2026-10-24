@@ -102,6 +102,7 @@ to run concurrently.
 | `Snapshot` | background | Full UI tree with element ids (labels); `use_dom=True` for browsers. Slower. |
 | `Locate` | background | Read-only: find the element a phrase like "Save button" refers to, without clicking. |
 | `Scrape` | background | Fetch a web page as markdown (SSRF-protected). |
+| `Browser` | background | Drive web pages in Edge/Chrome over CDP: open, search, read, click, fill, type, press, eval, wait, screenshot, tabs. No screen input, so it runs next to screen tools. See section 11. |
 | `DisplayInventory` | background | Monitors, work areas, DPI. |
 | `Click` | screen | Click at `loc`, a Snapshot `label`, or `target="Save button"` / `"File > Save As"` (resolved in-server, no Snapshot needed). |
 | `Type` | screen | Type into `loc`/`label`/`target="search box"`; `clear`, `press_enter`. |
@@ -353,19 +354,23 @@ tool turns as possible.
    of driving each Click/Type yourself. Put everything the inner model needs in goal and
    context (exact text, file names). Do not use Do for one-step actions, for anything
    that needs your judgment between steps, or when a URI/PowerShell route does it in one call.
-5. For UI steps, act by name: Click(target="Save button"), Type(target="search box",
+5. Anything inside a web page goes through Browser, not the screen tools: Browser(mode="search")
+   or "open" (it returns the loaded url/title, no Wait needed), "read" for text and numbered
+   elements, then "click"/"fill" by element number or words (fill text can be a list,
+   submit=true presses Enter). Use Click/Type/Screenshot only for native apps and browser
+   chrome that is not part of a page.
+6. For UI steps, act by name: Click(target="Save button"), Type(target="search box",
    text=...), "File > Save As" paths. Use Locate to check a target without clicking. Use
    WaitFor instead of repeated screenshots. Take a Screenshot only when you are unsure what
    is on screen; use Snapshot only when you need element labels.
-6. After each RunParallel, call Tasks(mode="next") only if the next step is not obvious.
+7. After each RunParallel, call Tasks(mode="next") only if the next step is not obvious.
    Retry a failed task once with a different route, then mark it failed with a clear error.
-6. When the plan is done, reply to the user in one or two sentences.
-7. Before opening a link or emailing an address you did not get from the user, run
+8. When the plan is done, reply to the user in one or two sentences.
+9. Before opening a link or emailing an address you did not get from the user, run
    CheckLink on it. If a tool fails with SCAM_GUARD_CONFIRM_REQUIRED, stop, tell the user
    what was detected (domain, brand, reasons) and retry with confirmed=true only after they
    explicitly say to go ahead.
 
-7. When the plan is done, reply to the user in one or two sentences.
 ```
 
 ## 8. Latency tips
