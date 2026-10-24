@@ -386,10 +386,10 @@ arrive as `security_event`s on the same event bus as `task_event`s.
 
 | Piece | What it does | Cost |
 |---|---|---|
-| Local detector (`guard/detector.py`) | Registrable domain (bundled Public Suffix List, private section included, so `evil.github.io` is not `github.io`), IDN/punycode, IP literals, `user@host` and `host\@brand` tricks, confusable skeleton (`rn`→`m`, `vv`→`w`, `cl`→`d`, `0`→`o`, `1`→`l`, Cyrillic/Greek homoglyphs), edit distance to ~250 brands' labels, brand in a subdomain or hyphenated label, embedded real domain, risky TLDs and hosting suffixes, hyphens, http, password field, tech-support-scam text. Official brand domains are fast-pathed as safe. No network. | well under 1 ms; cached hosts a few µs |
-| Watcher (`guard/watcher.py`) | Own UI Automation thread. Polls the foreground window/title (Win32) every 100 ms, the focused element every 300 ms and the address bar every 1.5 s, debounced; re-probes only on change. Reads page text only for pages that are not known-safe. | idle: microseconds per tick |
+| Local detector (`guard/detector.py`) | Registrable domain (bundled Public Suffix List, private section included, so `evil.github.io` is not `github.io`), IDN/punycode, IP literals, `user@host` and `host\@brand` tricks, confusable skeleton (`rn`→`m`, `vv`→`w`, `cl`→`d`, `0`→`o`, `1`→`l`, Cyrillic/Greek homoglyphs), edit distance to ~250 brands' labels, brand in a subdomain or hyphenated label, embedded real domain, risky TLDs and hosting suffixes, hyphens, http, password field, tech-support-scam text. Official brand domains are fast-pathed as safe. No network. | VM: first check of a host ~40–110 µs median (p95 190 µs), cached ~10 µs; suffix list + brands load once in ~12 ms at startup |
+| Watcher (`guard/watcher.py`) | Own UI Automation thread. Polls the foreground window/title (Win32) every 100 ms, the focused element every 300 ms and the address bar every 1.5 s, debounced; re-probes only on change. Reads page text only for pages that are not known-safe. | full probe 7–12 ms (focus ~1 ms, URL 0.1–0.3 ms from the cached address-bar element, page text 6–11 ms); event ~0.65–1.5 s after Edge launch |
 | Second opinion (`guard/model.py`) | Microsoft-Decision-1 via OpenRouter, gray zone only (suspicious, or an unknown site with a password field or scam-like text). Runs in the background, cached per domain for 15 min, and can only raise severity. | ~300 ms warm, off the fast path |
-| Gate (`tools/guard.py` `GuardGate`) | Middleware between the orchestration layer and the control gate. | reads cached state; one probe only when the foreground window/tab changed |
+| Gate (`tools/guard.py` `GuardGate`) | Middleware between the orchestration layer and the control gate. | refusal in ~1.8 ms round trip; one probe only when the foreground window/tab changed |
 
 ### Tools
 
@@ -410,7 +410,8 @@ arrive as `security_event`s on the same event bus as `task_event`s.
  "source": "browser", "cached": true, "probe_ms": 12.4, "ms": 0.3}
 ```
 
-`cached: true` means the watcher's context was reused (same window and tab title, under 2 s
+Measured on the Win10 VM with Edge: `cached: true` calls take 0.03–0.1 ms in the server
+(about 2 ms MCP round trip); `refresh=true` 8–13 ms. `cached: true` means the watcher's context was reused (same window and tab title, under 2 s
 old). `app` is `browser`, `email` (Outlook classic `outlook.exe`, new Outlook `olk.exe`, or a
 webmail compose with recipients) or `other`. Page text is never returned, only its length.
 
@@ -433,6 +434,10 @@ These calls are refused with a `ToolError` while the current context is `dangero
 - `Click(target=...)` (clicks by coordinates or label are not gated)
 - `Shortcut` for send/submit/paste keys: `enter`, `ctrl+enter`, `alt+s`, `ctrl+v`,
   `shift+insert`, `ctrl+shift+v`, `ctrl+shift+enter`
+
+Leaving a flagged page is never blocked: `Type(target="Address and search bar", ...)` and
+a `Shortcut` while the address bar has focus pass, and so do other shortcuts (`ctrl+l`,
+`ctrl+t`, `ctrl+w`, `alt+left`).
 
 The error text is JSON:
 
