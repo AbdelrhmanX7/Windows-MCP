@@ -1,5 +1,6 @@
 """Input tools — Click, Type, Scroll, Move, Shortcut, Wait, WaitFor."""
 
+import asyncio
 import json
 import math
 import re
@@ -8,7 +9,10 @@ from collections.abc import Callable, Iterator
 from typing import Any, Literal
 
 from mcp.types import ToolAnnotations
+from windows_mcp.desktop.control import get_controller
+from windows_mcp.desktop.ready import WaitTracker, readiness, ready_timeout
 from windows_mcp.desktop.utils import as_bool as _as_bool
+from windows_mcp.infrastructure.thread_affinity import run_uia_affine
 from windows_mcp.infrastructure import with_analytics
 from windows_mcp.resolver import ResolveError, Resolver
 from windows_mcp.resolver.scoring import EDIT_TYPES, split_path
@@ -217,6 +221,61 @@ def _validate_wait_for_args(
 
 _FOREGROUND_SETTLE_SEC = 0.15
 
+# Chords that usually open or close a window (dialog, Run box, new window): after them the
+# Shortcut tool watches the foreground a little longer for the change to start. Every other
+# chord gets a single sample, so editing keys cost nothing extra.
+_WINDOW_CHORDS = frozenset(
+    {
+        "ctrl+s",
+        "ctrl+shift+s",
+        "ctrl+o",
+        "ctrl+n",
+        "ctrl+shift+n",
+        "ctrl+p",
+        "ctrl+f",
+        "ctrl+h",
+        "ctrl+g",
+        "ctrl+t",
+        "ctrl+w",
+        "ctrl+shift+esc",
+        "alt+f4",
+        "alt+tab",
+        "win",
+        "win+r",
+        "win+e",
+        "win+i",
+        "win+s",
+        "f12",
+    }
+)
+_WINDOW_CHORD_WATCH_S = 0.5
+# A navigation shows on the reload button ~20 ms after Enter. Type sends Enter with a 50 ms
+# settle and Click has its own, so those take one sample; the Shortcut path's settle is
+# shorter and gets this extra look.
+_ENTER_WATCH_S = 0.05
+
+
+def _chord(shortcut: str) -> str:
+    return "+".join(part.strip().lower() for part in str(shortcut).split("+"))
+
+
+def _ready_note(before: Any, *, watch: float = 0.0) -> str:
+    """Wait (bounded) for what the action started to finish; '' when nothing changed."""
+    if before is None:
+        return ""
+    settled = readiness.after(before, watch=watch, checkpoint=get_controller().checkpoint_current)
+    return f" {settled.note}" if settled is not None else ""
+
+
+def _focused_name() -> str:
+    try:
+        from windows_mcp.uia.core import _AutomationClient
+
+        element = _AutomationClient.instance().IUIAutomation.GetFocusedElement()
+        return (element.CurrentName or "").strip()[:80] if element else ""
+    except Exception:
+        return ""
+
 
 def _resolve_target(
     desktop: Any,
@@ -266,15 +325,17 @@ def register(
         description=(
             "Performs mouse clicks at specified coordinates [x, y], on a UI element's label/id, "
             "or on a target described in words. "
-            "Supports button types: 'left' for selection/activation, 'right' for context menus, 'middle'. "
+            "Buttons: 'left', 'right' (context menu), 'middle'. "
             "Supports clicks: 0=hover only (no click), 1=single click (select/focus), 2=double click (open/activate). "
             "Provide exactly one of loc, label or target. "
             "target names the element (e.g. 'Play', 'Save button', 'search box', 'Seven') and is "
             "resolved in-process from the accessibility tree of the foreground window (or `window`) "
-            "in ~100 ms, so no Snapshot is needed first; 'File > Save As' clicks a menu chain. "
+            "in ~100 ms (no Snapshot needed); 'File > Save As' clicks a menu chain. "
             "Optional control_type (button, edit, menu, tab, link, checkbox, ...) and nth "
             "(1-based, reading order) disambiguate. On a weak match nothing is clicked and the "
-            "top candidates are returned. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning."
+            "top candidates are returned. Returns when the UI is ready: if the click opens a page "
+            "or window it waits for it and says so (e.g. 'Page loaded: ...'), so no Wait is "
+            "needed after it. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning."
         ),
         annotations=ToolAnnotations(
             title="Click",
@@ -301,6 +362,7 @@ def register(
         desktop = get_desktop()
         loc = _as_loc(loc)
         num_clicks = {0: "Hover", 1: "Single", 2: "Double"}
+        before = readiness.before() if clicks != 0 else None
         if target is not None:
             if loc is not None or label is not None:
                 raise ValueError("Provide exactly one of loc, label or target.")
@@ -313,7 +375,9 @@ def register(
                 nth=nth,
             )
             x, y = results[-1].best.center
-            lines = [f"{num_clicks.get(clicks)} {button} clicked at ({x},{y})."]
+            lines = [
+                f"{num_clicks.get(clicks)} {button} clicked at ({x},{y})." + _ready_note(before)
+            ]
             lines.extend(result.summary() for result in results)
             return "\n".join(lines)
         if loc is None and label is None:
@@ -324,7 +388,9 @@ def register(
             raise ValueError("Location must be a list of exactly 2 integers [x, y]")
         x, y = loc[0], loc[1]
         desktop.click(loc=loc, button=button, clicks=clicks)
-        return f"{num_clicks.get(clicks)} {button} clicked at ({x},{y})."
+        return f"{num_clicks.get(clicks)} {button} clicked at ({x},{y})." + _ready_note(
+            before, watch=_ENTER_WATCH_S
+        )
 
     @mcp.tool(
         name="Locate",
@@ -393,7 +459,7 @@ def register(
 
     @mcp.tool(
         name="Type",
-        description="Types text at specified coordinates [x, y] or passing a UI element's label/id. Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing. Set caret_position to 'start' (beginning), 'end' (end), or 'idle' (default). Provide exactly one of loc, label or target; target names the field in words (e.g. 'search box', 'File name') and is resolved like Click(target=...), preferring edit fields, with optional control_type, window and nth. clear and press_enter accept only true or false. An empty text types nothing, so combine it with clear=True to just empty a field. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning.",
+        description="Types text at coordinates [x, y], a UI element's label/id, or a target in words; with none of loc, label and target it types into the currently focused element (e.g. right after Shortcut ctrl+l). Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing; the call then returns only when the result is ready (a page load it started has finished, a dialog has opened) and says so, e.g. 'Page loaded: \"...\" (0.8 s)', so do not call Wait after it. Set caret_position to 'start', 'end' or 'idle' (default). Provide at most one of loc, label or target; target names the field in words (e.g. 'search box', 'File name') and is resolved like Click(target=...), preferring edit fields, with optional control_type, window and nth. clear and press_enter accept only true or false. An empty text types nothing, so combine it with clear=True to just empty a field. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning.",
         annotations=ToolAnnotations(
             title="Type",
             readOnlyHint=False,
@@ -422,6 +488,12 @@ def register(
         loc = _as_loc(loc)
         clear = _as_bool(clear, "clear")
         press_enter = _as_bool(press_enter, "press_enter")
+        if press_enter and isinstance(text, str) and text.endswith("\n"):
+            # "query\n" with press_enter=true would submit twice.
+            text = text[:-2] if text.endswith("\r\n") else text[:-1]
+        # Plain typing changes nothing worth waiting for; only Enter can start a navigation.
+        before = readiness.before() if press_enter else None
+        enter_note = "Enter pressed." if press_enter else ""
         if target is not None:
             if loc is not None or label is not None:
                 raise ValueError("Provide exactly one of loc, label or target.")
@@ -451,14 +523,29 @@ def register(
                 prefer_types=EDIT_TYPES,
             )
             x, y = results[-1].best.center
-            lines = [f"Typed {text} at ({x},{y})."]
+            lines = [
+                " ".join(filter(None, [f"Typed {text} at ({x},{y}).", enter_note]))
+                + _ready_note(before)
+            ]
             lines.extend(result.summary() for result in results)
             return "\n".join(lines)
         if loc is None and label is None:
-            raise ValueError("Either loc, label or target must be provided.")
+            # No location: type into whatever has the keyboard focus right now.
+            name = _focused_name()
+            desktop.type(
+                loc=None,
+                text=text,
+                caret_position=caret_position,
+                clear=clear,
+                press_enter=press_enter,
+            )
+            where = f'the focused element "{name}"' if name else "the focused element"
+            return " ".join(filter(None, [f"Typed {text} into {where}.", enter_note])) + (
+                _ready_note(before)
+            )
         if label is not None:
             loc = _resolve_label(desktop, label)
-        if len(loc) != 2:
+        if not isinstance(loc, list) or len(loc) != 2:
             raise ValueError("Location must be a list of exactly 2 integers [x, y]")
         x, y = loc[0], loc[1]
         desktop.type(
@@ -468,7 +555,9 @@ def register(
             clear=clear,
             press_enter=press_enter,
         )
-        return f"Typed {text} at ({x},{y})."
+        return " ".join(filter(None, [f"Typed {text} at ({x},{y}).", enter_note])) + (
+            _ready_note(before)
+        )
 
     @mcp.tool(
         name="Scroll",
@@ -579,7 +668,7 @@ def register(
 
     @mcp.tool(
         name="Shortcut",
-        description='Executes keyboard shortcuts using key combinations separated by +. Examples: "ctrl+c" (copy), "ctrl+v" (paste), "alt+tab" (switch apps), "win+r" (Run dialog), "win" (Start menu), "ctrl+shift+esc" (Task Manager). Use for quick actions and system commands. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning.',
+        description='Executes keyboard shortcuts using key combinations separated by +. Examples: "ctrl+c" (copy), "ctrl+v" (paste), "alt+tab" (switch apps), "win+r" (Run dialog), "win" (Start menu), "ctrl+shift+esc" (Task Manager). Use for quick actions and system commands. Returns when the UI is ready: a dialog/window it opens is in front, a page load it starts (enter, f5) has finished, and the result says so; no Wait is needed after it. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning.',
         annotations=ToolAnnotations(
             title="Shortcut",
             readOnlyHint=False,
@@ -588,15 +677,30 @@ def register(
             openWorldHint=False,
         ),
     )
-    @with_analytics(get_analytics(), "Shortcut-Tool")
+    @with_analytics(get_analytics(), "Shortcut-Tool", run_sync_in_thread=False)
     def shortcut_tool(shortcut: str, confirmed: bool | str = False, ctx: Context = None):
         _as_bool(confirmed, "confirmed")  # Read by the scam-guard gate (tools/guard.py).
+        before = readiness.before()
         get_desktop().shortcut(shortcut)
-        return f"Pressed {shortcut}."
+        chord = _chord(shortcut)
+        if chord in _WINDOW_CHORDS:
+            watch = _WINDOW_CHORD_WATCH_S
+        elif chord in ("enter", "return", "alt+enter", "ctrl+enter", "f5", "ctrl+r"):
+            watch = _ENTER_WATCH_S
+        else:
+            watch = 0.0
+        return f"Pressed {shortcut}." + _ready_note(before, watch=watch)
 
     @mcp.tool(
         name="Wait",
-        description="Pauses execution for specified duration in seconds. Use when waiting for: applications to launch/load, UI animations to complete, page content to render, dialogs to appear, or between rapid actions. Helps ensure UI is ready before next interaction.",
+        description=(
+            "Rarely needed: Click, Type(press_enter), Shortcut and App already return only when "
+            "the UI is ready (page loaded, dialog or window in front) and say so in their result. "
+            "Do not call Wait after them. Wait(duration) waits at most duration seconds but "
+            "returns after 0.1 s with 'UI already idle' when no page is loading and no window or "
+            "title is changing; while something is still loading it keeps waiting until that "
+            "finishes. To wait for something specific (text, a window, an element) use WaitFor."
+        ),
         annotations=ToolAnnotations(
             title="Wait",
             readOnlyHint=True,
@@ -606,14 +710,30 @@ def register(
         ),
     )
     @with_analytics(get_analytics(), "Wait-Tool")
-    def wait_tool(duration: int, ctx: Context = None) -> str:
-        time.sleep(duration)
-        return f"Waited for {duration} seconds."
+    async def wait_tool(duration: float, ctx: Context = None) -> str:
+        _validate_finite_number(duration, "duration")
+        if duration < 0:
+            raise ValueError("duration must be >= 0 seconds")
+        if ready_timeout() <= 0:
+            await asyncio.sleep(duration)
+            return f"Waited for {duration:g} seconds."
+        # Each probe runs on the UIA worker; the sleeps run on the event loop, so a long
+        # Wait never blocks other UIA tools.
+        tracker = WaitTracker(time.monotonic(), duration)
+        deep = False
+        while True:
+            sample = await run_uia_affine(readiness.sample, deep)
+            result = tracker.update(sample, time.monotonic())
+            if result is not None:
+                return result[1]
+            deep = tracker.busy and tracker.last.browser
+            await asyncio.sleep(tracker.sleep_for(time.monotonic()))
 
     @mcp.tool(
         name="WaitFor",
         description=(
-            "Waits until a UI condition is satisfied, polling the Windows accessibility tree "
+            "Waits until a specific UI condition is satisfied (returns as soon as it holds), "
+            "polling the Windows accessibility tree "
             "inside the tool to avoid repeated Snapshot calls. Conditions: text_exists, "
             "active_window, element_exists, element_enabled, focused_element. Provide text "
             "and/or window_name depending on the condition. Set use_dom=True for browser DOM text."
