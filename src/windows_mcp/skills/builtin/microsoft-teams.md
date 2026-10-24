@@ -27,8 +27,8 @@ Work/school chat, calls and meetings. **New Teams** is `ms-teams.exe` (packaged,
   - Chat with people (optionally prefilled message):
     `Start-Process 'msteams:/l/chat/0/0?users=anna@contoso.com,bob@contoso.com&message=Hi%20there'`
     (`topicName=<name>` names a group chat).
-  - Join a meeting: take the `https://teams.microsoft.com/l/meetup-join/...` link and open
-    `msteams:/l/meetup-join/...`, or `Start-Process '<https link>'` and choose "Open Teams" in the browser.
+  - Join a meeting: `Start-Process '<https://teams.microsoft.com/l/meetup-join/... link>'` and choose
+    "Open Teams" / "Join on the Teams app" in the browser page.
 - Opening a deep link fills the chat but does not send; the message still needs `Enter`.
 
 ## Keyboard shortcuts
@@ -56,7 +56,8 @@ Work/school chat, calls and meetings. **New Teams** is `ms-teams.exe` (packaged,
    3. `Screenshot()` to confirm the right chat, then `Shortcut(shortcut="enter")` to send.
    Without an email address: `Shortcut(shortcut="ctrl+n")`, `Type(text="Anna")`, pick from the
    suggestion list via `Snapshot`, `Shortcut(shortcut="tab")` into the message box, type, `Enter`.
-2. **Join a meeting from a link**: open the `msteams:/l/meetup-join/...` form, then in the pre-join
+2. **Join a meeting from a link**: `Start-Process '<https meeting link>'`, pick the Teams app on the
+   browser page, then in the pre-join
    screen `Snapshot()` and `Click` "Join now" (set mic/camera toggles there first).
 3. **In a call**: mute `Shortcut(shortcut="ctrl+shift+m")`, camera `ctrl+shift+o`, leave `ctrl+shift+h`
    (the meeting window must be focused: `App(mode="switch", name="Microsoft Teams")`).
