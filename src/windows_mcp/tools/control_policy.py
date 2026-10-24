@@ -25,6 +25,9 @@ OTHER = frozenset(
         "Context",
         "CheckLink",
         "Route",
+        # CDP only: renderer-level input, never the OS mouse/keyboard or window focus, so it is
+        # background-safe and runs alongside screen work (its own lock serializes its calls).
+        "Browser",
     }
 )
 MODES = {

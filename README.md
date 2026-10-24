@@ -829,6 +829,17 @@ sampling filters transient readings but cannot distinguish persistent query fail
 | `WINDOWS_MCP_PARALLEL_TIMEOUT` | `60` | Default per-call timeout (seconds) for `RunParallel` background calls. |
 | `WINDOWS_MCP_SCREEN_LOCK_TIMEOUT` | `60` | Seconds a screen-touching call waits for the screen lock before failing with `SCREEN_BUSY`. |
 
+### Browser tool
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_BROWSER` | _(Edge, then Chrome)_ | `edge`, `chrome` or the path of a Chromium-based browser executable. |
+| `WINDOWS_MCP_BROWSER_PORT` | `9222` | DevTools port to attach to; a launched browser listens on it. |
+| `WINDOWS_MCP_BROWSER_PROFILE` | platformdirs user data dir `browser-profile/` | Persistent profile for the launched browser, so logins and cookies stick between runs. |
+| `WINDOWS_MCP_BROWSER_ARGS` | _(none)_ | Extra launch flags, whitespace separated. |
+| `WINDOWS_MCP_BROWSER_WARM` | _(off)_ | `1`/`true`/`yes`/`on` attaches to (or launches) the browser in the background at server start, so the first web command is warm. |
+| `WINDOWS_MCP_BROWSER_SEARCH` | `bing` | Default search engine: `bing`, `google` or `duckduckgo`. |
+
 ### Scam guard
 
 | Variable | Default | Description |
@@ -930,6 +941,7 @@ MCP Client can access the following tools to interact with Windows:
 - `PowerShell`: To execute PowerShell commands.
 - `FileSystem`: Read, write, copy, move, delete, list, search, and inspect files and directories.
 - `Scrape`: To scrape the entire webpage for information.
+- `Browser`: Fast web automation inside Edge/Chrome over the Chrome DevTools Protocol: no screenshots, no OS mouse/keyboard, works with the browser in the background, so `RunParallel` can run it next to screen work. Attaches to a browser on the debugging port (`WINDOWS_MCP_BROWSER_PORT`, default 9222) or launches Edge (then Chrome) with a persistent dedicated profile (`WINDOWS_MCP_BROWSER_PROFILE`; Chromium refuses remote debugging on the default profile). Modes: `open(url, new_tab?)`, `search(query, engine?)` (returns the top results, numbered), `read` (page text plus numbered links/buttons/inputs with labels, placeholders and values), `click(element | target | selector | role+name, nth?)`, `fill(element | target | selector, text, submit?)` (replaces the value; `text` may be a list, each submitted with Enter), `type(text, target?, submit?)`, `press(keys)` (`Enter`, `ctrl+a`, `Tab Tab Enter`), `eval(script)` (JSON result), `wait(text | selector | url, gone?, timeout)` (returns as soon as it holds), `screenshot(full_page?)` (page JPEG), `tabs(action=list|switch|new|close, tab?)`, `back`, `forward`, `reload`. Every action returns the new url/title and `loaded` after a navigation; `read=true` appends the page read. On a page the scam guard flags, `click`/`fill`/`type`/`eval` and Enter/paste keys fail with `SCAM_GUARD_CONFIRM_REQUIRED` until retried with `confirmed=true`. See [docs/INTEGRATION.md](docs/INTEGRATION.md#11-browser-web-pages-over-cdp).
 - `MultiSelect`: Select multiple items (files, folders, checkboxes) with optional Ctrl key. Uses bulk label-to-coordinate resolution when labels are provided.
 - `MultiEdit`: Enter text into multiple input fields at specified coordinates. Uses bulk label-to-coordinate resolution when labels are provided.
 - `Clipboard`: Read or set Windows clipboard content.

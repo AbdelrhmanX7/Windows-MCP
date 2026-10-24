@@ -4,6 +4,7 @@ from windows_mcp.tools import (
     agent,
     app,
     apps,
+    browser,
     clipboard,
     control_status,
     display,
@@ -36,6 +37,7 @@ _MODULES = [
     registry,
     apps,
     guard,
+    browser,
     tasks,
     agent,
 ]
