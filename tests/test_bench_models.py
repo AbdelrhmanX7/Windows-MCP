@@ -91,6 +91,22 @@ def test_router_bench_with_mocked_decisions_api():
     json.dumps(report)
 
 
+def test_do_bench_skips_without_keys_and_starts_nothing():
+    import asyncio
+    from argparse import Namespace
+
+    bench = load()
+    args = Namespace(outer_model="anthropic:claude-sonnet-5-5", server_cmd="x", tasks="")
+    report = asyncio.run(bench.bench_do(args, {}))
+    assert report == {
+        "tasks": {},
+        "skipped": {
+            "do": "anthropic needs ANTHROPIC_API_KEY",
+            "outer": "anthropic needs ANTHROPIC_API_KEY",
+        },
+    }
+
+
 def test_cost_from_token_prices():
     bench = load()
     usage = {"input_tokens": 1_000_000, "output_tokens": 0, "cache_read_tokens": 1_000_000}

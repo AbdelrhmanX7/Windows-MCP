@@ -293,6 +293,7 @@ def test_decision_question_builders():
         noul("Bug?", {"yes": "y"})
     assert score("Urgency?", ["low", "high"])["criteria"] == ["low", "high"]
     assert is_decision_model("microsoft/microsoft-decision-1")
+    assert is_decision_model("openai/gpt-6-luna-decisions")
     assert not is_decision_model("anthropic/claude-haiku-5.5")
 
 

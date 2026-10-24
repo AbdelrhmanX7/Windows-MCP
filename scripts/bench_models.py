@@ -269,12 +269,6 @@ async def _check(client: Any, task: dict, answer: str) -> bool:
 
 async def bench_do(args: argparse.Namespace, env: dict) -> dict:
     """Do vs outer-model-per-step on the desktop tasks, over a real stdio MCP session."""
-    from fastmcp import Client
-    from fastmcp.client.transports import StdioTransport
-
-    from windows_mcp.agent.loop import DoRun
-    from windows_mcp.models.chat import get_chat_client
-
     report: dict = {"tasks": {}, "skipped": {}}
     do_spec = env.get("WINDOWS_MCP_DO_MODEL") or config.DEFAULT_DO_MODEL
     needs = {"do": _needs(do_spec, env), "outer": _needs(args.outer_model, env)}
@@ -284,6 +278,13 @@ async def bench_do(args: argparse.Namespace, env: dict) -> dict:
             print(f"skip {mode} ({do_spec if mode == 'do' else args.outer_model}): {need}")
     if all(needs.values()):
         return report
+    # Imported only when something will run, so a keyless host needs no server deps.
+    from fastmcp import Client
+    from fastmcp.client.transports import StdioTransport
+
+    from windows_mcp.agent.loop import DoRun
+    from windows_mcp.models.chat import get_chat_client
+
     command, *cmd_args = args.server_cmd.split()
     transport = StdioTransport(
         command=command, args=cmd_args, env={**env, "ANONYMIZED_TELEMETRY": "false"}

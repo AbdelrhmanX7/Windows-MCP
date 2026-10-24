@@ -5,9 +5,11 @@ score text, such as a scam guard, can share it.
 
 Confirmed against the docs and live calls (2026-10-24):
 
-- Not a chat model: ``/api/v1/chat/completions`` rejects it with HTTP 400 ("Use the
-  /api/alpha/decisions endpoint"), and it is absent from the default ``/api/v1/models``
-  list (it appears with ``?output_modalities=decisions``; modality ``text->decisions``).
+- Not a chat model: ``/api/v1/chat/completions`` rejects it with HTTP 400 ("... is a
+  decisions model and cannot be used with the chat/completions endpoint. Use the
+  /api/alpha/decisions endpoint instead."). It is absent from the default
+  ``/api/v1/models`` list and listed by ``?output_modalities=decisions`` (modality
+  ``text->decisions``, 32768 context, $0.042/M input, output free).
 - ``POST https://openrouter.ai/api/alpha/decisions`` with ``Authorization: Bearer <key>``
   and body ``{"model", "state", "questions"}``. ``state`` is a string, object or array.
   ``questions`` maps names you choose to typed questions, answered in parallel in one call:
@@ -37,7 +39,8 @@ MAX_STATE_CHARS = 60000  # 32K-token context; keep well inside it.
 
 def is_decision_model(model: str) -> bool:
     """True for models served by the Decisions API rather than chat completions."""
-    return model.split(":", 1)[0].startswith(DECISION_1) or "/decision-" in model
+    # e.g. microsoft/microsoft-decision-1, openai/gpt-6-luna-decisions
+    return "decision" in model.rsplit("/", 1)[-1]
 
 
 def choice(instructions: str, criteria: dict[str, str]) -> dict:

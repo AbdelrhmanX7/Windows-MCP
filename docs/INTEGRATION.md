@@ -427,6 +427,11 @@ the 100 to 250 ms TLS handshake on every step.
    `done` with `verified: false` and a note in the transcript. `verified` is `true` when
    the check passed and `null` when no check ran.
 
+**Cancellation.** Cancelling a `Do` request does not stop it mid-run. Screen calls are
+shielded until they finish, so `Do` runs on until it is done or reaches its own
+`timeout`, holding the screen the whole time. A user takeover does stop it at the next
+inner call. Pass a tight `timeout`, for example 20 to 30 s for a single-app goal.
+
 **Screen ownership.** `Do` is a screen call: it holds the FIFO screen lock for its whole
 run, including model think time. Another request's `Click` waits until `Do` ends, so it
 can never land between two of Do's steps. Its inner calls run under that lock and are not
@@ -507,6 +512,10 @@ supports the `noul` and `score` question types.
 | `openrouter:deepseek/deepseek-v4.1-flash` | 0.975 | 1293 ms | 4768 ms | $0.14 |
 | `openrouter:stepfun/step-3.7-flash` | 0.74 (20 of 80 replies had no label) | 2667 ms | 5176 ms | $0.21 |
 
+StepFun's unlabeled replies come from its reasoning. One inspected reply spent all
+1024 `max_tokens` (3.2K characters of reasoning, then rambling content) and stopped
+with `finish_reason: length`. It is a poor fit for a JSON classifier at this budget.
+
 - The DeepSeek and StepFun rows ran with the first wording of the option descriptions.
   On that wording Decision-1 scored 0.925 (p50 280 ms) and Haiku 1.00.
 - Decision-1's remaining misses label two multi-step requests as `clarify`.
@@ -522,13 +531,17 @@ as direct MCP calls from a client, because `tool_ms` includes the middleware:
 | Tool | Inside Do | Direct |
 |---|---|---|
 | `Click(target=...)` in Calculator | 114 to 133 ms | 113 to 147 ms |
-| `App` launch | 65 to 97 ms | 68 to 89 ms |
+| `App` launch, Notepad | 65 to 97 ms | 68 to 89 ms |
+| `App` launch, Calculator (UWP) | 2.9 to 3.0 s | 0.8 to 3.0 s |
 
 Calculator 12*34 took eight steps: 3.9 s total, 2.9 s of it in the App launch.
+`WaitFor(active_window, "Notepad")` timed out at 10 s in 2 of 3 runs, both inside Do and as
+direct calls. That is a pre-existing WaitFor issue, not one introduced by Do.
 
 **Do with live Haiku 5.5, against fake tools.** A Notepad grocery-list goal took one or
 two model turns at 0.9 to 2.4 s per turn. Prompt caching read about 3,000 tokens per turn
-from turn 2 onward. With Decision-1 verification on, a whole run took 1.8 to 3.2 s.
+from turn 2 onward. A whole run took 1.8 to 2.6 s without verification, and 3.1 to 3.2 s
+with Decision-1 verification.
 
 ### When the planner should call Do, and when individual tools
 
