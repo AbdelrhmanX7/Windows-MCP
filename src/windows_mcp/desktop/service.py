@@ -910,9 +910,11 @@ class Desktop:
     # "hello from windows-mcp drive test" rendering as
     # "hello tttttttttttttttttttttttttt" on a 4-core Win11 VM. The
     # paste path is reliable because it bypasses the scan-code queue
-    # entirely. Plain-text only; control chars route through SendKeys
-    # so escape sequences ({Enter}, {Tab}, …) still work.
+    # entirely. Newlines and tabs are still sent as real {Enter}/{Tab}
+    # keys between pasted runs, so a chat box still submits on Enter and
+    # a form still moves focus on Tab (see _send_text).
     _LONG_TEXT_PASTE_THRESHOLD = 20
+    _LINE_BREAKS = re.compile(r"(\r?\n|\t)")
 
     def type(
         self,
@@ -954,28 +956,44 @@ class Desktop:
             owner.checkpoint_current()
             uia.SendKeys("{Back}", waitTime=0.05)
             owner.record_step_current()
-        # Per-key SendKeys for short text (so escape sequences keep working);
-        # clipboard paste for long text (so the scan-code queue can't race).
-        has_control_chars = any(c in text for c in ("\n", "\t", "{", "}"))
-        if len(text) >= self._LONG_TEXT_PASTE_THRESHOLD and not has_control_chars:
-            self._paste_text(text)
-        else:
-            # Bump interval from 0.02 → 0.04. Keeps short-text speed acceptable
-            # while reducing key-loss; each character is a cancellation point.
-            # waitTime=None adds the configured settle on top of the interval.
-            for ch in text:
-                owner.checkpoint_current()
-                uia.SendKeys(_escape_text_for_sendkeys(ch), interval=0.04, waitTime=None)
-                owner.record_step_current()
+        self._send_text(text)
         if press_enter:
             owner.checkpoint_current()
             uia.SendKeys("{Enter}", waitTime=0.05)
             owner.record_step_current()
 
+    def _send_text(self, text: str) -> None:
+        """Type text: paste long runs, key in short ones, send line breaks and tabs as keys.
+
+        A multi-line text used to go key by key (about 60 ms per character), so a short email
+        took ~17 s. Now each line of 20+ characters is one paste and the {Enter} between lines
+        is still a real key press, so the target sees the same keys as before.
+        """
+        owner = get_controller()
+        for part in self._LINE_BREAKS.split(text):
+            if not part:
+                continue
+            if part in ("\n", "\r\n", "\t"):
+                owner.checkpoint_current()
+                uia.SendKeys("{Tab}" if part == "\t" else "{Enter}", interval=0.04, waitTime=None)
+                owner.record_step_current()
+                continue
+            part = part.replace("\r", "")
+            if len(part) >= self._LONG_TEXT_PASTE_THRESHOLD:
+                self._paste_text(part)
+                continue
+            # Bump interval from 0.02 → 0.04. Keeps short-text speed acceptable
+            # while reducing key-loss; each character is a cancellation point.
+            # waitTime=None adds the configured settle on top of the interval.
+            for ch in part:
+                owner.checkpoint_current()
+                uia.SendKeys(_escape_text_for_sendkeys(ch), interval=0.04, waitTime=None)
+                owner.record_step_current()
+
     def _paste_text(self, text: str):
         """Stash text on the clipboard, Ctrl+V, restore prior clipboard.
-        Plain-text only — control chars (newlines, tabs, braces) need to
-        route through SendKeys instead so escape sequences are honored.
+        Single-line runs only: _send_text sends line breaks and tabs as keys.
+        Braces are fine here (the clipboard carries them literally).
         """
         prior = None
         owner = get_controller()
@@ -1336,9 +1354,7 @@ class Desktop:
                 sleep(self._UIA_RETRY_SLEEP_MS / 1000.0)
                 continue
         if last_error is not None:
-            logger.error(
-                f"Error in get_active_window after {attempt + 1} attempt(s): {last_error}"
-            )
+            logger.error(f"Error in get_active_window after {attempt + 1} attempt(s): {last_error}")
         return None
 
     def get_foreground_window(self) -> uia.Control | None:
