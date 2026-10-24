@@ -277,9 +277,37 @@ def _start_watchdog(desktop):
         return None
 
 
+# Modules FastMCP imports lazily while serving the first tool call (its session-state
+# store pulls in py-key-value and beartype, ~300 ms on a cold VM). None touch comtypes.
+_FIRST_CALL_MODULES = (
+    "key_value.aio.adapters.pydantic",
+    "key_value.aio.stores.memory",
+)
+
+
+def _prewarm_first_call_imports() -> None:
+    """Import FastMCP's lazily loaded first-call modules ahead of the first request."""
+    import importlib
+
+    for name in _FIRST_CALL_MODULES:
+        try:
+            importlib.import_module(name)
+        except Exception:
+            logger.debug("Pre-import of %s failed", name, exc_info=True)
+
+
 async def _warm_up_capture(desktop: Any) -> None:
+    """Warm the first-call imports and the capture path without blocking the handshake.
+
+    Args:
+        desktop: The server's Desktop instance.
+    """
     from windows_mcp.infrastructure import run_uia_affine
 
+    try:
+        await asyncio.to_thread(_prewarm_first_call_imports)
+    except Exception:
+        logger.debug("First-call import warm-up failed", exc_info=True)
     try:
         await run_uia_affine(desktop.warm_up_capture)
     except Exception:

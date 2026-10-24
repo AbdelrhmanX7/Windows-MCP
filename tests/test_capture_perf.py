@@ -448,3 +448,28 @@ class TestGlowCache:
             flash_overlay._glow_bitmap(w, 1, ((0, 0, w, 1),))
         assert len(flash_overlay._glow_cache) <= flash_overlay._GLOW_CACHE_SIZE
         flash_overlay._glow_cache.clear()
+
+
+class TestFirstCallPrewarm:
+    def test_imports_listed_modules_and_swallows_failures(self, monkeypatch):
+        import importlib
+
+        import windows_mcp.__main__ as main_module
+
+        seen = []
+
+        def fake_import(name):
+            seen.append(name)
+            raise ImportError(name)
+
+        monkeypatch.setattr(importlib, "import_module", fake_import)
+        main_module._prewarm_first_call_imports()
+        assert seen == list(main_module._FIRST_CALL_MODULES)
+
+    def test_listed_modules_exist(self):
+        import importlib.util
+
+        import windows_mcp.__main__ as main_module
+
+        for name in main_module._FIRST_CALL_MODULES:
+            assert importlib.util.find_spec(name) is not None, name
