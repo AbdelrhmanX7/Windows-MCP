@@ -282,6 +282,23 @@ LIB = r"""
     const v = 'value' in el && typeof el.value === 'string' ? el.value : el.innerText;
     return { value: clean(v, 200) };
   }
+  if (op === 'quiet') {
+    // Resolve once the DOM stops changing for a.quiet ms (client-side rendering after
+    // DOMContentLoaded), or after a.max ms.
+    return new Promise((res) => {
+      const t0 = performance.now(); let last = t0;
+      const obs = new MutationObserver(() => { last = performance.now(); });
+      obs.observe(document, { subtree: true, childList: true });  // Nodes added = still rendering.
+      const tick = () => {
+        const now = performance.now();
+        if (now - last >= a.quiet || now - t0 >= a.max) {
+          obs.disconnect(); return res({ ms: Math.round(now - t0) });
+        }
+        setTimeout(tick, 15);
+      };
+      setTimeout(tick, 15);
+    });
+  }
   if (op === 'wait') {
     const want = a.text ? a.text.toLowerCase() : null;
     const check = () => {

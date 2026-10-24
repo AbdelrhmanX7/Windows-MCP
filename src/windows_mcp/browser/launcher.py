@@ -133,6 +133,25 @@ def find_executable() -> str:
     raise LaunchError("No Edge or Chrome found; set WINDOWS_MCP_BROWSER to the executable")
 
 
+def listening(port: int) -> bool | None:
+    """Is anything listening on 127.0.0.1:*port*? None when unknown.
+
+    On Windows a connect to a closed loopback port is retried for ~1 s before it is refused,
+    so the TCP table (psutil, a few ms) answers "nobody there" far faster than a probe.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import psutil
+
+        for conn in psutil.net_connections(kind="tcp"):
+            if conn.status == psutil.CONN_LISTEN and conn.laddr and conn.laddr.port == port:
+                return True
+        return False
+    except Exception:
+        return None
+
+
 def probe(port: int, timeout: float = 0.3) -> dict | None:
     """``/json/version`` of a browser listening on *port*, or None."""
     try:
@@ -183,12 +202,12 @@ def ensure_browser(url: str | None = None) -> tuple[dict, bool]:
     browser endpoint.
     """
     port = browser_port()
-    info = probe(port)
+    info = probe(port) if listening(port) is not False else None
     if info:
         return info, False
     profile = profile_dir()
     other = _active_port(profile)
-    if other and other != port:
+    if other and other != port and listening(other) is not False:
         info = probe(other)
         if info:
             return info, False
@@ -196,7 +215,7 @@ def ensure_browser(url: str | None = None) -> tuple[dict, bool]:
     proc = launch(exe, port, profile, url)
     deadline = time.monotonic() + LAUNCH_TIMEOUT
     while time.monotonic() < deadline:
-        info = probe(port, timeout=0.5)
+        info = probe(port, timeout=0.5) if listening(port) is not False else None
         if info:
             return info, True
         if proc.poll() is not None and proc.returncode not in (0, None):

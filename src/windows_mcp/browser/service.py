@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 # After a click/Enter (and one renderer round trip): how long a navigation may take to start.
 NAV_DETECT_S = 0.06
 SEARCH_RESULTS_WAIT_S = 3.0
+QUIET_MS = 60  # After a navigation: DOM unchanged this long counts as rendered...
+QUIET_MAX_MS = 1000  # ...but never wait longer than this.
 SEARCH_ENGINES = {
     "bing": "https://www.bing.com/search?q={q}",
     "google": "https://www.google.com/search?q={q}",
@@ -251,10 +253,12 @@ class BrowserService:
         if self.session and self.target and not conn.closed:
             return self.session
         pages = self.pages()
+        # Bring the picked tab to the front: a hidden tab gets no frames, so input and
+        # screenshots on it stall.
         if pages:
-            return self.attach(pages[0]["targetId"])
+            return self.attach(pages[0]["targetId"], activate=True)
         tid = conn.send("Target.createTarget", {"url": "about:blank"})["targetId"]
-        return self.attach(tid)
+        return self.attach(tid, activate=True)
 
     # ------------------------------------------------------------------ evaluate
     def evaluate(self, expression: str, *, timeout: float = 10.0, retries: int = 2) -> Any:
@@ -290,6 +294,13 @@ class BrowserService:
 
     def js(self, op: str, args: dict | None = None, *, timeout: float = 10.0) -> Any:
         return self.evaluate(page_js.call(op, args), timeout=timeout)
+
+    def quiet(self, quiet_ms: int = QUIET_MS, max_ms: int = QUIET_MAX_MS) -> None:
+        """Let client-side rendering finish after a navigation (DOM quiet for *quiet_ms*)."""
+        try:
+            self.js("quiet", {"quiet": quiet_ms, "max": max_ms}, timeout=max_ms / 1000 + 2)
+        except BrowserError, CDPError:
+            pass
 
     def state(self) -> dict:
         try:

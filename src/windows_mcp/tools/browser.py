@@ -373,6 +373,8 @@ def run(svc, mode: str, p: dict) -> tuple[dict, list]:
     else:
         raise BrowserError(f"unknown mode {mode!r}")
 
+    if nav and mode != "search" and out.get("loaded") and wait_until != "none":
+        svc.quiet()
     st = svc.state()
     out = {"url": st.get("url"), "title": st.get("title"), **out}
     if nav:
