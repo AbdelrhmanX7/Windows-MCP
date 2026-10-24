@@ -109,11 +109,15 @@
     },
     {
       "name": "Click",
-      "description": "Performs mouse clicks at specified coordinates [x, y] or passing a UI element's label/id. Supports button types: 'left' for selection/activation, 'right' for context menus, 'middle'. Supports clicks: 0=hover only (no click), 1=single click (select/focus), 2=double click (open/activate). Provide either loc or label."
+      "description": "Performs mouse clicks at coordinates [x, y], on a UI element's label/id, or on a target described in words (e.g. 'Save button', 'File > Save As'), resolved in-process from the accessibility tree. On a weak match nothing is clicked and the top candidates are returned."
+    },
+    {
+      "name": "Locate",
+      "description": "Read-only: finds the UI element a target described in words refers to in the foreground (or named) window and returns the best match with confidence plus the top candidates (name, type, loc, score), without clicking."
     },
     {
       "name": "Type",
-      "description": "Types text at specified coordinates [x, y] or passing a UI element's label/id. Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing. Set caret_position to 'start' (beginning), 'end' (end), or 'idle' (default). Provide either loc or label. clear and press_enter accept only true or false. An empty text types nothing, so combine it with clear=True to just empty a field."
+      "description": "Types text at specified coordinates [x, y] or passing a UI element's label/id. Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing. Set caret_position to 'start' (beginning), 'end' (end), or 'idle' (default). Provide either loc or label. clear and press_enter accept only true or false. An empty text types nothing, so combine it with clear=True to just empty a field. Accepts target to name the field in words instead of loc/label."
     },
     {
       "name": "Scroll",

@@ -786,6 +786,17 @@ sampling filters transient readings but cannot distinguish persistent query fail
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/cursortouch-windows-mcp-badge.png)](https://mseep.ai/app/cursortouch-windows-mcp)
 
+### Click target resolver
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_RESOLVER_MIN_CONFIDENCE` | `0.7` | `Click`/`Type` with `target=` act only at or above this confidence (`0`–`1`). Below it they click nothing and return the top candidates instead. |
+| `WINDOWS_MCP_RESOLVER_VISION` | _(off)_ | Set to `anthropic` (or `on`) to enable the tier-2 vision fallback. Off by default. |
+| `WINDOWS_MCP_RESOLVER_MODEL` | `claude-haiku-5-5` | Vision model used by tier 2. The key comes from `ANTHROPIC_API_KEY`. |
+| `WINDOWS_MCP_RESOLVER_VISION_TIMEOUT` | `3.0` | Seconds allowed for one tier-2 request. On timeout, HTTP error or a "none" answer the resolver falls back to the tier-1 result and does not click. |
+
+**Privacy note:** tier 1 (accessibility) never leaves the machine. Tier 2 is the only part of the resolver that sends data off the machine: when `WINDOWS_MCP_RESOLVER_VISION` is set *and* accessibility matching is weak (or the window exposes almost no elements), it sends a downscaled JPEG of **the target window only**, with numbered boxes drawn on it, plus the target text, to the configured provider (`api.anthropic.com`). Having `ANTHROPIC_API_KEY` in the environment does not enable it. Leave the variable unset if window contents must not leave the machine.
+
 ### Telemetry
 
 | Variable | Default | Description |
@@ -845,8 +856,9 @@ Remote (with auth + IP allowlist + TLS):
 
 MCP Client can access the following tools to interact with Windows:
 
-- `Click`: Click on the screen at the given coordinates.
-- `Type`: Type text on an element (optionally clears existing text).
+- `Click`: Click on the screen at the given coordinates, on a Snapshot label, or on a `target` described in words (`Click(target="Save button")`, `Click(target="Seven")`, `Click(target="File > Save As")`). A target is resolved inside the server from the accessibility tree of the foreground window (or `window="Spotify"`), in ~10–40 ms on simple windows and up to ~200 ms on large dialogs (measured on a Win10 VM), so no Snapshot round trip is needed. Optional `control_type` (`button`, `edit`, `menu`, `tab`, `link`, `checkbox`, ...) and `nth` (1-based, reading order) disambiguate. Words like "button", "box"/"field", "tab", "link", "checkbox" and "menu" in the target act as control-type hints. If the best match is below `WINDOWS_MCP_RESOLVER_MIN_CONFIDENCE`, nothing is clicked and the tool returns an error listing the top 3 candidates (name, type, location, score). The result names what was resolved, e.g. `resolved: "Seven" (button) via uia in 23 ms, confidence 1.00`.
+- `Locate`: Read-only counterpart of `Click(target=...)`: returns the best match and top candidates without clicking. For a path only the first step can be located.
+- `Type`: Type text on an element (optionally clears existing text). Accepts `target` (e.g. `Type(target="search box", text="cats")`) to find the field by name, preferring edit fields.
 - `Scroll`: Scroll vertically or horizontally on the window or specific regions.
 - `Move`: Move mouse pointer or drag (set drag=True) to coordinates. For deterministic
   drag, set `from_loc=[x, y]` with `drag=True` to press at an explicit start point and
