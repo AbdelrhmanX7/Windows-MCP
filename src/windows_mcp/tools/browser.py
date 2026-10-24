@@ -193,6 +193,7 @@ def run(svc, mode: str, p: dict) -> tuple[dict, list]:
     out: dict[str, Any] = {}
     extra: list = []
     nav = False
+    svc.page()  # Attach (or launch) once; a no-op on a warm connection.
 
     if mode == "open":
         if not p["url"]:
