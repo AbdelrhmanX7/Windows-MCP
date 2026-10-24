@@ -50,7 +50,7 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 
 **Virtual Desktop Manager** — `vdm/core.py`: Tracks which windows belong to which Windows virtual desktop (Win10/11).
 
-**Domain services** — thin packages backing the system tools: `filesystem/` (read/write/copy/move/delete/list/search/info), `registry/` (get/set/delete/list, implemented via PowerShell cmdlets), `powershell/` (`PowerShellExecutor` plus environment resolution), `process/` (list/kill), `notifications/`. Registry and PowerShell tools shell out, so their latency is dominated by process startup.
+**Domain services** — thin packages backing the system tools: `filesystem/` (read/write/copy/move/delete/list/search/info), `registry/` (get/set/delete/list, implemented via PowerShell cmdlets), `powershell/` (`PowerShellExecutor` plus environment resolution), `process/` (list/kill), `notifications/`. Registry, PowerShell, App and Notification run their commands in a persistent PowerShell session (`powershell/session.py`; falls back to one process per call when the session is busy, fails, or is disabled), so a warm call costs milliseconds instead of a ~1 s process start.
 
 **Apps & skills** — `apps/`: installed-app inventory. `sources.py` reads Get-StartApps + AppsFolder + Get-AppxPackage in one PowerShell call and the uninstall keys / HKCR URL protocols with `winreg`; `service.py` merges them into `AppRecord`s (name, aliases, AUMID, exe, process names, publisher, version, URI schemes, sources) and caches them in memory and on disk with a TTL. `skills/`: markdown+frontmatter skills (`frontmatter.py` is a small YAML-subset parser, no PyYAML), `store.py` loads `skills/builtin/*.md` (package data) and the user folder with precedence builtin > user > generated, `generate.py` builds a `generated` skill from the Win32 menu bar, ribbon KeyTips and a bounded UIA walk. `tools/apps.py` exposes `Apps`/`AppSkill`, the `skill://` resources, and the one-line Snapshot hint (in-memory process/title lookup).
 
@@ -99,6 +99,8 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `WINDOWS_MCP_APPS_TTL` | `21600` | Seconds the installed-app inventory cache (memory + platformdirs user cache `apps-inventory.json`) stays fresh. `Apps(mode="refresh")` forces a rebuild. Resolved in `apps/service.py`. |
 | `WINDOWS_MCP_SKILLS_DIR` | platformdirs user data dir `skills/` | Folder for user and generated skills. Resolved in `skills/store.py`. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(off)_ | Set to `1`/`true`/`yes`/`on` to suppress the orange-red glowing border that briefly appears after every screenshot. Resolved in `desktop/flash_overlay.py`. |
+| `WINDOWS_MCP_INPUT_SETTLE_MS` | `30` | Milliseconds slept after each injected click/key chord/wheel tick (was a fixed 500 ms from python-uiautomation; `500` restores it, range `0`–`5000`). Resolved in `uia/settle.py` and read on every call. Same-spot clicks are still kept apart by the double-click time and `Type` polls for the clicked window to take the foreground (`desktop/input_timing.py`). |
+| `WINDOWS_MCP_POWERSHELL_SESSION` | `on` | Set to `off`/`0`/`false`/`no` to start a fresh PowerShell process per command instead of using the persistent session. Session semantics (state reset per command, timeout/respawn, one-shot fallback) are documented in `powershell/session.py`; resolved in `powershell/service.py`. |
 
 ## Security Context
 

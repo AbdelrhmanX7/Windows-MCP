@@ -155,7 +155,7 @@ def test_type_stops_before_next_character_after_preemption(monkeypatch):
     with pytest.raises(control.ControlBlocked):
         desktop.type((1, 2), "abc")
     assert send.call_count == 1
-    send.assert_any_call("a", interval=0.04, waitTime=0.05)
+    send.assert_any_call("a", interval=0.04, waitTime=None)
 
 
 def test_drag_releases_its_mouse_button_after_preemption(monkeypatch):

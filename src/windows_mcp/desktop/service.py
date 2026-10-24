@@ -16,6 +16,7 @@ from windows_mcp.tree.service import Tree
 from windows_mcp.desktop import screenshot as screenshot_capture
 from windows_mcp.desktop.control import get_controller
 from windows_mcp.desktop import flash_overlay
+from windows_mcp.desktop.input_timing import click_guard, wait_for_foreground_at
 from windows_mcp.infrastructure import safe_get
 from windows_mcp.desktop import control_overlay
 from urllib.parse import urljoin
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 import windows_mcp.uia as uia  # noqa: E402
+from windows_mcp.uia.settle import input_settle_seconds  # noqa: E402
 
 # Key name aliases for shortcut keys that differ from UIA SpecialKeyNames
 _KEY_ALIASES = {
@@ -378,7 +380,30 @@ class Desktop:
     def get_cursor_location(self) -> tuple[int, int]:
         return uia.GetCursorPos()
 
-    def get_apps_from_start_menu(self) -> dict[str, str]:
+    # Enumerating the Start menu costs two PowerShell round trips (Get-StartApps
+    # alone is ~0.4 s cold), so the map is reused for a while; launch_app refreshes
+    # it on a miss so a just-installed app is still found.
+    _APPS_CACHE_TTL_S = 300.0
+
+    def get_apps_from_start_menu(self, refresh: bool = False) -> dict[str, str]:
+        """Get installed apps, cached for ``_APPS_CACHE_TTL_S`` seconds.
+
+        Args:
+            refresh: Ignore the cached map and enumerate again.
+
+        Returns:
+            Lower-cased display name mapped to AppID or shortcut path.
+        """
+        cached = getattr(self, "_apps_cache", None)
+        fresh = cached is not None and perf_counter() - cached[0] < self._APPS_CACHE_TTL_S
+        if fresh and not refresh:
+            return dict(cached[1])
+        apps = self._enumerate_start_menu_apps()
+        if apps:
+            self._apps_cache = (perf_counter(), apps)
+        return dict(apps)
+
+    def _enumerate_start_menu_apps(self) -> dict[str, str]:
         """Get installed apps. Tries Get-StartApps first, falls back to shortcut scanning."""
         command = "Get-StartApps | ConvertTo-Csv -NoTypeInformation"
         apps_info, status = PowerShellExecutor.execute_command(command)
@@ -539,17 +564,20 @@ class Desktop:
                 if status != 0:
                     return response
 
-                # Smart wait using UIA Exists (avoids manual Python loops)
                 launched = False
                 if pid > 0:
-                    if uia.WindowControl(ProcessId=pid).Exists(maxSearchSeconds=10):
-                        launched = True
+                    launched = self._wait_for_process_window(pid, timeout=10)
 
                 if not launched:
-                    # Fallback: Regex search for the window title
+                    # Fallback: Regex search for the window title (UWP apps, and
+                    # launchers that hand off to another process).
                     safe_name = re.escape(name)
-                    if uia.WindowControl(RegexName=f"(?i).*{safe_name}.*").Exists(
-                        maxSearchSeconds=10
+                    # Top-level windows only: each probe is cheap enough to repeat
+                    # every 50 ms, and a nested element with the app's name cannot
+                    # pass for its window.
+                    window = uia.WindowControl(searchDepth=1, RegexName=f"(?i).*{safe_name}.*")
+                    if window.Exists(
+                        maxSearchSeconds=10, searchIntervalSeconds=self._WINDOW_POLL_S
                     ):
                         launched = True
 
@@ -569,6 +597,51 @@ class Desktop:
                 else:
                     return response
 
+    _WINDOW_POLL_S = 0.05
+
+    def _wait_for_process_window(self, pid: int, timeout: float) -> bool:
+        """Poll until ``pid`` owns a visible top-level window.
+
+        EnumWindows is a cheap user32 walk, so it can run every 50 ms and return
+        as soon as the window is mapped (UIA's Exists polled a tree search every
+        0.5 s).
+
+        Args:
+            pid: Process id returned by Start-Process.
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            True when a window appeared in time.
+        """
+
+        def has_window() -> bool:
+            found = []
+
+            def callback(hwnd, _):
+                if win32gui.IsWindowVisible(hwnd) and not win32gui.GetWindow(
+                    hwnd, win32con.GW_OWNER
+                ):
+                    _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
+                    if owner_pid == pid:
+                        found.append(hwnd)
+                        return False
+                return True
+
+            try:
+                win32gui.EnumWindows(callback, None)
+            except Exception:
+                # EnumWindows reports an error when the callback stops it early.
+                pass
+            return bool(found)
+
+        deadline = perf_counter() + timeout
+        while True:
+            if has_window():
+                return True
+            if perf_counter() >= deadline:
+                return False
+            sleep(self._WINDOW_POLL_S)
+
     def _check_app_exists(self, app_id: str) -> bool:
         """Check if an app with the given AppID exists in shell:AppsFolder."""
         safe_app_id = ps_quote(app_id)
@@ -582,6 +655,12 @@ class Desktop:
     def launch_app(self, name: str) -> tuple[str, int, int]:
         apps_map = self.get_apps_from_start_menu()
         matched_app = process.extractOne(name, apps_map.keys(), score_cutoff=70)
+        if matched_app is None or matched_app[1] < 100:
+            # The cached map may predate an install, and a fuzzy hit on it could
+            # pick the wrong app (e.g. "notepad++" -> "notepad" right after
+            # Notepad++ is installed), so only an exact hit skips re-enumerating.
+            apps_map = self.get_apps_from_start_menu(refresh=True)
+            matched_app = process.extractOne(name, apps_map.keys(), score_cutoff=70)
         if matched_app is None:
             return (f"{name.title()} not found in start menu.", 1, 0)
         app_name, _ = matched_app
@@ -784,26 +863,34 @@ class Desktop:
             return
         match button:
             case "left":
+                # Only the first press is guarded: the presses of one multi-click are
+                # meant to merge, so they keep the half-double-click-time spacing.
+                click_guard.before_click(x, y, "left")
                 if clicks >= 2:
                     dbl_wait = uia.GetDoubleClickTime() / 2000.0
                     for i in range(clicks):
                         owner.checkpoint_current()
-                        uia.Click(x, y, waitTime=dbl_wait if i < clicks - 1 else 0.5)
+                        uia.Click(x, y, waitTime=dbl_wait if i < clicks - 1 else None)
                         owner.record_step_current()
                 else:
                     owner.checkpoint_current()
                     uia.Click(x, y)
                     owner.record_step_current()
+                click_guard.after_click(x, y, "left")
             case "right":
                 for _ in range(clicks):
+                    click_guard.before_click(x, y, "right")
                     owner.checkpoint_current()
                     uia.RightClick(x, y)
                     owner.record_step_current()
+                    click_guard.after_click(x, y, "right")
             case "middle":
                 for _ in range(clicks):
+                    click_guard.before_click(x, y, "middle")
                     owner.checkpoint_current()
                     uia.MiddleClick(x, y)
                     owner.record_step_current()
+                    click_guard.after_click(x, y, "middle")
 
     # Strings longer than this typed via clipboard paste instead of
     # per-key SendKeys. SendKeys at high cadence loses keystrokes on
@@ -829,8 +916,14 @@ class Desktop:
         owner.checkpoint_current()
         x, y = loc
         self._validate_screen_point(x, y)
+        click_guard.before_click(x, y, "left")
         uia.Click(x, y)
+        click_guard.after_click(x, y, "left")
         owner.record_step_current()
+        # The keys are queued behind the click, so they cannot overtake it; what can
+        # go wrong is typing while the clicked window is still being activated.
+        # Poll for that (bounded) instead of the old blind 0.5 s sleep.
+        wait_for_foreground_at(x, y)
         if caret_position == "start":
             owner.checkpoint_current()
             uia.SendKeys("{Home}", waitTime=0.05)
@@ -840,7 +933,9 @@ class Desktop:
             uia.SendKeys("{End}", waitTime=0.05)
             owner.record_step_current()
         if clear:
-            sleep(0.5)
+            # Focus was already awaited after the click; one settle lets the caret
+            # land before Ctrl+A selects the field.
+            sleep(input_settle_seconds())
             owner.checkpoint_current()
             uia.SendKeys("{Ctrl}a", waitTime=0.05)
             owner.record_step_current()
@@ -855,9 +950,10 @@ class Desktop:
         else:
             # Bump interval from 0.02 → 0.04. Keeps short-text speed acceptable
             # while reducing key-loss; each character is a cancellation point.
+            # waitTime=None adds the configured settle on top of the interval.
             for ch in text:
                 owner.checkpoint_current()
-                uia.SendKeys(_escape_text_for_sendkeys(ch), interval=0.04, waitTime=0.05)
+                uia.SendKeys(_escape_text_for_sendkeys(ch), interval=0.04, waitTime=None)
                 owner.record_step_current()
         if press_enter:
             owner.checkpoint_current()
@@ -991,7 +1087,8 @@ class Desktop:
         )
         effective_duration = self._normalize_drag_duration(duration)
         owner.checkpoint_current()
-        sleep(0.5)
+        # Let the previous action settle before the button goes down.
+        sleep(input_settle_seconds())
         owner.checkpoint_current()
         if normalized_from_loc is None:
             cx, cy = uia.GetCursorPos()
@@ -1061,10 +1158,13 @@ class Desktop:
                     lambda: owner.physical_key_down(uia.Keys.VK_CONTROL),
                 )
             for x, y in points:
+                click_guard.before_click(x, y, "left")
                 owner.checkpoint_current()
-                uia.Click(x, y, waitTime=0.2)
+                uia.Click(x, y)
+                click_guard.after_click(x, y, "left")
                 owner.record_step_current()
-                sleep(0.5)
+                # Give the list a moment to apply the selection before the next click.
+                sleep(input_settle_seconds())
         finally:
             if press_ctrl:
                 owner.input_ledger.release("key:ctrl")

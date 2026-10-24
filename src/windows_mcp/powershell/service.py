@@ -1,5 +1,6 @@
 """ PowerShell command executor service """
 
+import atexit
 import base64
 import ctypes
 import ctypes.wintypes
@@ -8,11 +9,13 @@ import os
 import winreg
 import shutil
 import subprocess
+import threading
 
 from windows_mcp.desktop.utils import is_elevated
+from windows_mcp.powershell.session import PowerShellSession, SessionResult, SessionUnavailable
 from windows_mcp.powershell.utils import run_with_graceful_timeout
 
-__all__ = ["PowerShellExecutor"]
+__all__ = ["PowerShellExecutor", "prewarm_session", "session_enabled", "shutdown_sessions"]
 
 logger = logging.getLogger(__name__)
 
@@ -204,24 +207,169 @@ def _resolve_shell(shell: str | None, env: dict[str, str]) -> str:
     return os.path.join(system_root, _WINDOWS_POWERSHELL)
 
 
+SESSION_ENV = "WINDOWS_MCP_POWERSHELL_SESSION"
+_SESSION_OFF_VALUES = ("0", "false", "no", "off", "disabled")
+# Consecutive failed starts of one shell before the session is given up on for
+# the rest of the process lifetime (every call then uses the one-shot path).
+_MAX_SESSION_START_FAILURES = 3
+
+_sessions: dict[str, PowerShellSession] = {}
+_session_start_failures: dict[str, int] = {}
+_sessions_lock = threading.Lock()
+
+
+def session_enabled() -> bool:
+    """Return whether commands may run in the persistent session.
+
+    On unless ``WINDOWS_MCP_POWERSHELL_SESSION`` is ``0``/``false``/``no``/``off``.
+    """
+    return os.environ.get(SESSION_ENV, "on").strip().lower() not in _SESSION_OFF_VALUES
+
+
+def shutdown_sessions() -> None:
+    """Stop every persistent session and clear the start-failure counts."""
+    with _sessions_lock:
+        sessions = list(_sessions.values())
+        _sessions.clear()
+        _session_start_failures.clear()
+    for session in sessions:
+        try:
+            session.close()
+        except Exception:
+            logger.debug("Failed to close PowerShell session", exc_info=True)
+
+
+atexit.register(shutdown_sessions)
+
+
+def _session_for(shell: str, env: dict[str, str], cwd: str) -> PowerShellSession | None:
+    """Return the session for ``shell``, replacing one that died or went stale."""
+    stale = None
+    with _sessions_lock:
+        if _session_start_failures.get(shell, 0) >= _MAX_SESSION_START_FAILURES:
+            return None
+        session = _sessions.get(shell)
+        if session is not None and not session.lock.locked():
+            # A session is replaced when its host died (timeout, exit, crash) or
+            # when the environment a fresh shell would get has changed, e.g. PATH
+            # updated in the registry by an installer.
+            started = session.pid is not None
+            if (started and not session.alive) or session.env != env:
+                stale, session = session, None
+                del _sessions[shell]
+        if session is None:
+            session = PowerShellSession(shell, env, cwd)
+            _sessions[shell] = session
+    if stale is not None:
+        stale.close()
+    return session
+
+
+def _run_in_session(
+    shell: str, env: dict[str, str], command: str, cwd: str, timeout: float
+) -> SessionResult | None:
+    """Run ``command`` in the persistent session for ``shell``.
+
+    Returns:
+        The result, or None when the command was not delivered (session disabled,
+        busy with another call, or failed to start) and must run one-shot instead.
+    """
+    session = _session_for(shell, env, cwd)
+    if session is None:
+        return None
+    # Never queue behind another call (a 30 s command would stall App launch):
+    # a busy session sends this call down the one-shot path, as before.
+    if not session.lock.acquire(blocking=False):
+        return None
+    try:
+        if session.pid is None:
+            try:
+                session.start()
+            except SessionUnavailable as exc:
+                with _sessions_lock:
+                    _session_start_failures[shell] = _session_start_failures.get(shell, 0) + 1
+                    if _sessions.get(shell) is session:
+                        del _sessions[shell]
+                logger.debug("PowerShell session unavailable, using one-shot: %s", exc)
+                return None
+            with _sessions_lock:
+                _session_start_failures.pop(shell, None)
+        try:
+            return session.run(command, cwd, timeout)
+        except SessionUnavailable as exc:
+            logger.debug("PowerShell session lost before the command, using one-shot: %s", exc)
+            return None
+    finally:
+        session.lock.release()
+
+
+def prewarm_session(shell: str | None = None) -> bool:
+    """Start the persistent session ahead of the first command.
+
+    Args:
+        shell: The shell to warm, as accepted by ``execute_command``.
+
+    Returns:
+        True when a session is running afterwards.
+    """
+    if not session_enabled():
+        return False
+    env = _prepare_env()
+    env["NO_COLOR"] = "1"
+    resolved = _resolve_shell(shell, env)
+    result = _run_in_session(resolved, env, "$null", os.path.expanduser("~"), 30)
+    return result is not None
+
+
+def _one_shot(
+    shell: str, env: dict[str, str], command: str, cwd: str, timeout: float
+) -> tuple[str | bytes, str | bytes, int]:
+    """Run ``command`` in a fresh PowerShell process (the pre-session behaviour).
+
+    Raises:
+        subprocess.TimeoutExpired: If the command overran ``timeout``.
+    """
+    # $OutputEncoding: controls how PS5.1 encodes output written to its stdout pipe.
+    # Without this set to UTF-8, PS5.1 uses the system codepage and native process
+    # stdout is silently lost when Python reads the pipe.
+    # [Console]::OutputEncoding: controls how PS decodes bytes from native exe stdout.
+    utf8_command = (
+        "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        f"{command}"
+    )
+    encoded = base64.b64encode(utf8_command.encode("utf-16le")).decode("ascii")
+    args = [shell, "-NoProfile"]
+    # Only older Windows PowerShell (5.1) uses -OutputFormat Text successfully here
+    shell_name = os.path.basename(shell).lower().replace(".exe", "")
+    if shell_name == "powershell":
+        args.extend(["-OutputFormat", "Text"])
+    args.extend(["-EncodedCommand", encoded])
+
+    result = run_with_graceful_timeout(
+        args,
+        stdin=subprocess.DEVNULL,  # Prevent child processes from inheriting the MCP pipe stdin
+        capture_output=True,  # No errors='ignore' - let subprocess return bytes
+        timeout=timeout,
+        cwd=cwd,
+        env=env,
+    )
+    return result.stdout, result.stderr, result.returncode
+
+
 class PowerShellExecutor:
-    """Static utility class for executing PowerShell commands."""
+    """Static utility class for executing PowerShell commands.
+
+    Commands run in a persistent PowerShell session (see ``powershell/session.py``)
+    unless ``WINDOWS_MCP_POWERSHELL_SESSION`` is off; a command the session cannot
+    take (busy, failed to start) runs in a fresh process instead.
+    """
 
     @staticmethod
     def execute_command(
             command: str, timeout: int = 10, shell: str | None = None
     ) -> tuple[str, int]:
         try:
-            # $OutputEncoding: controls how PS5.1 encodes output written to its stdout pipe.
-            # Without this set to UTF-8, PS5.1 uses the system codepage and native process
-            # stdout is silently lost when Python reads the pipe.
-            # [Console]::OutputEncoding: controls how PS decodes bytes from native exe stdout.
-            utf8_command = (
-                "$OutputEncoding = [System.Text.Encoding]::UTF8; "
-                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-                f"{command}"
-            )
-            encoded = base64.b64encode(utf8_command.encode("utf-16le")).decode("ascii")
             env = _prepare_env()
             # NO_COLOR suppresses ANSI escape sequences in pwsh 7.2+ (and many other CLI tools).
             # PS5.1 has no ANSI output, so this is harmlessly ignored there.
@@ -229,37 +377,31 @@ class PowerShellExecutor:
             env["NO_COLOR"] = "1"
 
             shell = _resolve_shell(shell, env)
+            cwd = os.path.expanduser(path="~")
 
-            args = [shell, "-NoProfile"]
-            # Only older Windows PowerShell (5.1) uses -OutputFormat Text successfully here
-            shell_name = os.path.basename(shell).lower().replace(".exe", "")
-            if shell_name == "powershell":
-                args.extend(["-OutputFormat", "Text"])
-            args.extend(["-EncodedCommand", encoded])
-
-            result = run_with_graceful_timeout(
-                args,
-                stdin=subprocess.DEVNULL,  # Prevent child processes from inheriting the MCP pipe stdin
-                capture_output=True,  # No errors='ignore' - let subprocess return bytes
-                timeout=timeout,
-                cwd=os.path.expanduser(path="~"),
-                env=env,
-            )
+            session_result = None
+            if session_enabled():
+                session_result = _run_in_session(shell, env, command, cwd, timeout)
+            if session_result is not None:
+                if session_result.timed_out:
+                    return "Command execution timed out", 1
+                stdout, stderr = session_result.stdout, session_result.stderr
+                returncode = session_result.returncode
+            else:
+                stdout, stderr, returncode = _one_shot(shell, env, command, cwd, timeout)
             # Handle both bytes and str output (subprocess behavior varies by environment)
-            stdout = result.stdout
-            stderr = result.stderr
             if isinstance(stdout, bytes):
                 stdout = stdout.decode("utf-8", errors="replace")
             if isinstance(stderr, bytes):
                 stderr = stderr.decode("utf-8", errors="replace")
             output = stdout or stderr
             # If the command failed with "Access is denied" and we aren't elevated, add a helpful hint
-            if result.returncode != 0 and "Access is denied" in output and not is_elevated():
+            if returncode != 0 and "Access is denied" in output and not is_elevated():
                 output += (
                     "\n\nHINT: This command may require an elevated (Administrator) terminal. "
                     "The Windows-MCP server is currently running at a lower integrity level."
                 )
-            return output, result.returncode
+            return output, returncode
         except subprocess.TimeoutExpired:
             return "Command execution timed out", 1
         except Exception as e:

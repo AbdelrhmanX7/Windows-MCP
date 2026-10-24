@@ -223,6 +223,31 @@ def _exit_missing_dependency(exc: ModuleNotFoundError) -> NoReturn:
     sys.exit(1)
 
 
+def _start_warmup(desktop) -> threading.Thread | None:
+    """Warm the persistent PowerShell session and the Start-menu app map.
+
+    Runs on a daemon thread so it never delays the MCP handshake. The first
+    PowerShell/Registry/App call then skips the ~1 s shell start, and the first
+    App launch skips enumerating the Start menu. A call that arrives while the
+    warm-up still holds the session simply runs one-shot.
+    """
+    from windows_mcp.powershell.service import prewarm_session, session_enabled
+
+    if not session_enabled():
+        return None
+
+    def warm() -> None:
+        try:
+            if prewarm_session():
+                desktop.get_apps_from_start_menu()
+        except Exception:
+            logger.debug("Background warm-up failed", exc_info=True)
+
+    thread = threading.Thread(target=warm, name="windows-mcp-warmup", daemon=True)
+    thread.start()
+    return thread
+
+
 def _start_watchdog(desktop):
     """Create and start the UIA WatchDog, or return None if it is unavailable.
 
@@ -334,6 +359,7 @@ def _build_mcp() -> FastMCP:
         screen_size = desktop.get_screen_size()
 
         watchdog = _start_watchdog(desktop)
+        _start_warmup(desktop)
 
         # Set thresholds before installing input hooks; invalid TOML was rejected at load.
         controller.mouse_takeover_units = _control_config.mouse_takeover_units
