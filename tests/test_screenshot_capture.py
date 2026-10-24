@@ -528,6 +528,64 @@ class TestCapture:
         assert backend_name == "pillow"
         assert image.size == (1920, 1080)
 
+    def test_unexpected_exception_type_still_falls_back(self, monkeypatch):
+        """Backends raising outside the OSError family must not abort the chain (#417)."""
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value.grab.side_effect = AttributeError("camera released")
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(screenshot, "mss", None)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+
+        fake_img = Image.new("RGB", (1920, 1080), "blue")
+        monkeypatch.setattr(
+            screenshot, "ImageGrab", MagicMock(grab=MagicMock(return_value=fake_img))
+        )
+
+        image, backend_name = capture(MONITOR_1, backend="auto")
+
+        assert backend_name == "pillow"
+        assert image.size == (1920, 1080)
+
+    def test_is_available_raising_falls_back(self, monkeypatch):
+        """A backend whose availability probe raises is skipped, not fatal (#417)."""
+        monkeypatch.setattr(screenshot, "dxcam", MagicMock())
+        monkeypatch.setattr(screenshot, "mss", None)
+
+        def _boom():
+            raise IndexError("list index out of range")
+
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(_boom))
+
+        fake_img = Image.new("RGB", (1920, 1080), "blue")
+        monkeypatch.setattr(
+            screenshot, "ImageGrab", MagicMock(grab=MagicMock(return_value=fake_img))
+        )
+
+        image, backend_name = capture(MONITOR_0, backend="auto")
+
+        assert backend_name == "pillow"
+        assert image.size == (1920, 1080)
+
+    def test_all_backends_failing_reports_each_cause(self, monkeypatch):
+        """When every backend fails, the error names each backend and its cause."""
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.side_effect = IndexError("list index out of range")
+        monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
+        monkeypatch.setattr(screenshot, "mss", None)
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS))
+        monkeypatch.setattr(
+            screenshot,
+            "ImageGrab",
+            MagicMock(grab=MagicMock(side_effect=OSError("screen grab failed"))),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            capture(MONITOR_1, backend="auto")
+
+        message = str(excinfo.value)
+        assert "dxcam: IndexError: list index out of range" in message
+        assert "pillow: OSError: screen grab failed" in message
+
     def test_capture_returns_non_empty_image(self, monkeypatch):
         """Verify the returned image has actual pixel content (not all-zero)."""
         colored_img = Image.new("RGB", (640, 480), (255, 128, 0))
