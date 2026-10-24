@@ -118,6 +118,7 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `WINDOWS_MCP_ROUTER_MODEL` | `openrouter:microsoft/microsoft-decision-1` | `Route` and Do's verifier; decision models use the Decisions API, chat models a JSON prompt. Resolved in `models/config.py`. |
 | `WINDOWS_MCP_MODEL_TIMEOUT` | `15` | Seconds per model request. Resolved in `models/config.py`. |
 | `WINDOWS_MCP_DO_EFFORT` | `low` | Anthropic effort for the Do model; `off` omits it. Resolved in `models/config.py`. |
+| `WINDOWS_MCP_DO_THINKING` | _(unset)_ | `disabled`/`adaptive` thinking for the Anthropic Do model; unset sends nothing. Resolved in `models/config.py`. |
 
 ## Security Context
 

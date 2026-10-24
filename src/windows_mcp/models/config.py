@@ -114,3 +114,20 @@ def effort(env: dict | None = None) -> str | None:
         logger.warning("Unknown WINDOWS_MCP_DO_EFFORT=%r, using %s", raw, DEFAULT_EFFORT)
         return DEFAULT_EFFORT
     return raw
+
+
+def thinking(env: dict | None = None) -> str | None:
+    """``WINDOWS_MCP_DO_THINKING``: ``adaptive`` or ``disabled`` (Anthropic); unset omits it.
+
+    Claude Haiku 5.5 thinks adaptively by default; ``disabled`` is accepted at effort high
+    or below and saves the thinking tokens on every turn.
+    """
+    raw = str(_env(env).get("WINDOWS_MCP_DO_THINKING", "")).strip().casefold()
+    if not raw or raw in ("default", "auto"):
+        return None
+    if raw in ("adaptive", "on"):
+        return "adaptive"
+    if raw in _OFF or raw == "disabled":
+        return "disabled"
+    logger.warning("Unknown WINDOWS_MCP_DO_THINKING=%r, leaving thinking at the default", raw)
+    return None

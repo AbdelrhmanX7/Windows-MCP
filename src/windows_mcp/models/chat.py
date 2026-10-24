@@ -94,11 +94,18 @@ class AnthropicChat:
     provider = "anthropic"
 
     def __init__(
-        self, api_key: str, model: str, *, effort: str | None = "low", http: Any = None
+        self,
+        api_key: str,
+        model: str,
+        *,
+        effort: str | None = "low",
+        thinking: str | None = None,
+        http: Any = None,
     ) -> None:
         self._key = api_key
         self.model = model
         self.effort = effort
+        self.thinking = thinking
         self.http = http
 
     def __repr__(self) -> str:
@@ -166,6 +173,8 @@ class AnthropicChat:
             body["tool_choice"] = {"type": "auto"}
         if self.effort:
             body["output_config"] = {"effort": self.effort}
+        if self.thinking:
+            body["thinking"] = {"type": self.thinking}
         return body
 
     def chat(
@@ -377,7 +386,14 @@ class ScriptedChat:
             time.sleep(self.latency_ms / 1000)
         index = self.calls
         self.calls += 1
-        turn = self.turns[index] if index < len(self.turns) else {"text": "script finished"}
+        if index < len(self.turns):
+            turn = self.turns[index]
+        else:  # Out of turns: give up explicitly so a failed run is not reported as ok.
+            turn = {
+                "tool_calls": [
+                    {"name": "Done", "args": {"answer": "script exhausted", "success": False}}
+                ]
+            }
         calls = [
             ToolCall(f"s{index}_{n}", c["name"], dict(c.get("args") or {}))
             for n, c in enumerate(turn.get("tool_calls") or [])
@@ -395,7 +411,11 @@ def get_chat_client(spec: ModelSpec | None, env: dict | None = None, *, http: An
         raise ModelUnavailable("no model configured: WINDOWS_MCP_DO_MODEL is off")
     if spec.provider == "anthropic":
         return AnthropicChat(
-            config.api_key("anthropic", env), spec.model, effort=config.effort(env), http=http
+            config.api_key("anthropic", env),
+            spec.model,
+            effort=config.effort(env),
+            thinking=config.thinking(env),
+            http=http,
         )
     if spec.provider == "openrouter":
         return OpenRouterChat(config.api_key("openrouter", env), spec.model, http=http)

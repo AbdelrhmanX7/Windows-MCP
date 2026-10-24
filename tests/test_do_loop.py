@@ -41,8 +41,9 @@ class FakeRouter:
         self.choices = list(choices)
         self.seen = []
 
-    def verify(self, before, after, expected, timeout=None):
+    def verify(self, before, after, expected, actions=None, timeout=None):
         self.seen.append((before, after, expected))
+        self.actions = actions
         picked = self.choices.pop(0)
         return Decision(picked, {picked: 1.0}, 0.9, 5.0, "fake", {"cost": 0.000001})
 
@@ -182,7 +183,22 @@ def test_verifier_failed_feeds_back_then_succeeds_with_still_loading_retry():
     ]
     assert router.seen[0] == ("before", "after-1", "Calculator window")
     assert summary["verify_ms"] >= 0 and summary["turns"] == 2
+    assert summary["verified"] is True
     assert sum(e["event"] == "verify" for e in events) == 3
+
+
+def test_two_verifier_rejections_report_unverified():
+    router = FakeRouter("failed", "failed")
+    done = (DONE, {"answer": "Typed", "success": True, "expect": "milk in Notepad"})
+    summary, *_ = run(
+        "type milk",
+        [turn(("Type", {"target": "Text Editor", "text": "milk"}), done), turn(done)],
+        router=router,
+    )
+    assert summary["status"] == "done" and summary["ok"] and summary["verified"] is False
+    assert summary["turns"] == 2
+    assert "Type" in router.actions[0] and "milk" in router.actions[0]
+    assert "did not confirm" in format_text(summary)
 
 
 def test_done_without_expect_or_success_false():

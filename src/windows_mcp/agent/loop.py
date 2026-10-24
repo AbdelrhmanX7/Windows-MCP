@@ -50,8 +50,9 @@ candidates back: pick one of their names or coordinates. Use Snapshot only when 
 need to look; never guess coordinates.
 4. After launching an app, its window may need a moment: use WaitFor(condition=active_window, \
 window_name=...) before typing into it if the next step depends on it.
-5. Finish with Done(answer, success, expect). expect describes what the screen should show \
-if you succeeded; it is checked automatically, so call Done in the same turn as your last \
+5. Finish with Done(answer, success, expect). expect describes what should be true if you \
+succeeded, in terms visible in an accessibility snapshot (a focused window title, a value in \
+a display field, an element name); it is checked automatically, so call Done in the same turn as your last \
 actions when confident. If the goal is impossible or unsafe, call Done(success=false) and \
 say why in answer.
 6. Do only what the goal asks. Never delete files, close unsaved work, send messages, buy \
@@ -135,6 +136,7 @@ class DoRun:
         self.verify_ms = 0.0
         self.usage: dict = {}
         self.verifications: list[dict] = []
+        self.verified: bool | None = None
         self.last_obs = ""
 
     # ------------------------------------------------------------------ helpers
@@ -180,8 +182,12 @@ class DoRun:
         self.last_obs = text
         return text
 
-    async def _verify(self, before: str, expect: str) -> dict | None:
-        """Ask the router whether Done's ``expect`` holds; None when no verifier is usable."""
+    async def _verify(self, before: str, expect: str, actions: list[str]) -> dict | None:
+        """Ask the router whether Done's ``expect`` holds; None when no verifier is usable.
+
+        The state holds the screen before and after plus what the actions reported, since
+        an accessibility snapshot does not always show typed text or values.
+        """
         if self.router is None or not expect or not self.observe:
             return None
         for attempt in range(2):
@@ -193,6 +199,7 @@ class DoRun:
                     before,
                     after,
                     expect,
+                    actions=actions,
                     timeout=max(0.5, min(10.0, self.remaining())),
                 )
             except (ModelError, ModelUnavailable, ValueError) as exc:
@@ -241,6 +248,7 @@ class DoRun:
         messages: list[dict] = [{"role": "user", "content": intro}]
         before = first_obs
         actions = 0
+        rejections = 0
         max_turns = self.max_steps + 2
         while self.turns < max_turns:
             if self.remaining() <= 0.5:
@@ -331,16 +339,30 @@ class DoRun:
                 expect = str(args.get("expect") or "").strip()
                 if not success:
                     return "failed", answer, False
-                check = await self._verify(before, expect)
-                if check is None or check["choice"] != "failed":
+                evidence = [
+                    f"{st['tool']} {json.dumps(st['args'], ensure_ascii=False)[:200]} -> "
+                    f"{'ok' if st['ok'] else 'failed'}: {st.get('result') or st.get('error')}"
+                    for st in self.steps[-6:]
+                ]
+                check = await self._verify(before, expect, evidence)
+                if check is None:
                     return "done", answer, True
-                # The verifier disagrees: let the model see the screen and continue.
+                if check["choice"] != "failed":
+                    self.verified = True
+                    return "done", answer, True
+                rejections += 1
+                if rejections > 1:
+                    # Second disagreement: report the model's answer, flagged unverified.
+                    self.verified = False
+                    return "done", answer, True
+                # The verifier disagrees: let the model see the screen and try once more.
                 for r in results:
                     if r["id"] == done_call.id:
                         r["is_error"] = True
                         r["content"] = (
-                            "Not finished: the screen does not show the expected outcome "
-                            f"({expect}). Screen now:\n{self.last_obs}"
+                            "Not confirmed: the screen does not seem to show the expected "
+                            f"outcome ({expect}). Fix it if something is wrong, otherwise call "
+                            f"Done again. Screen now:\n{self.last_obs}"
                         )
             messages.append({"role": "tool_results", "results": results})
         return "max_steps", f"stopped after {self.turns} model turns", False
@@ -368,6 +390,7 @@ class DoRun:
             "overhead_ms": overhead,
             "overhead_per_step_ms": round(overhead / n, 1) if n else None,
             "usage": self.usage,
+            "verified": self.verified,
             "verifications": self.verifications,
             "steps": self.steps,
         }
@@ -395,4 +418,6 @@ def format_text(summary: dict) -> str:
         )
     for v in summary.get("verifications") or []:
         lines.append(f"verify #{v['attempt']}: {v['choice']} ({v['latency_ms']} ms)")
+    if summary.get("verified") is False:
+        lines.append("NOTE: the final screen check did not confirm the result.")
     return "\n".join(lines)

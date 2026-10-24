@@ -395,6 +395,7 @@ environment and are never logged, echoed or included in errors. Without a key, `
 | `WINDOWS_MCP_ROUTER_MODEL` | `openrouter:microsoft/microsoft-decision-1` | The scorer for `Route` and for `Do`'s final-screen check. A chat model spec also works, answering through a JSON prompt. `off` disables both. |
 | `WINDOWS_MCP_MODEL_TIMEOUT` | `15` | Seconds per model request. |
 | `WINDOWS_MCP_DO_EFFORT` | `low` | Anthropic `output_config.effort` for the Do model. `off` omits it. |
+| `WINDOWS_MCP_DO_THINKING` | _(model default)_ | `disabled` or `adaptive` for the Anthropic Do model. On Haiku 5.5 a turn took about the same time either way (1.2 to 1.5 s), so the default leaves it unset. |
 
 On Anthropic, the tool menu and system prompt are cached with `cache_control`, plus a
 rolling breakpoint on the newest turn. History is append-only, so turn 2 onward reads the
@@ -420,7 +421,11 @@ the 100 to 250 ms TLS handshake on every step.
    takes a fresh snapshot. Decision-1 then scores before, after and expect as `succeeded`,
    `failed` or `still_loading`. That costs one 0.3 to 0.6 s call instead of another model
    turn. On `still_loading` it waits 0.7 s and checks once more. On `failed` the model sees
-   the new screen and continues.
+   the new screen and gets one more try. The verifier's state is `{expected, before,
+   after, actions}`, where `actions` are the last step results (an accessibility snapshot
+   does not always show typed text). If it rejects the second `Done` too, the run ends
+   `done` with `verified: false` and a note in the transcript. `verified` is `true` when
+   the check passed and `null` when no check ran.
 
 **Screen ownership.** `Do` is a screen call: it holds the FIFO screen lock for its whole
 run, including model think time. Another request's `Click` waits until `Do` ends, so it

@@ -273,7 +273,8 @@ def test_scripted_chat(tmp_path):
     assert isinstance(chat, ScriptedChat)
     first = chat.chat("s", [], [])
     assert first.tool_calls[0].name == "Shortcut"
-    assert chat.chat("s", [], []).tool_calls == []
+    exhausted = chat.chat("s", [], []).tool_calls
+    assert [(c.name, c.args["success"]) for c in exhausted] == [("Done", False)]
     with pytest.raises(ModelUnavailable):
         get_chat_client(parse_spec(f"script:{tmp_path / 'missing.json'}"), {})
 

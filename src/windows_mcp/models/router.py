@@ -191,8 +191,19 @@ class Router:
         )
 
     def verify(
-        self, before: str, after: str, expected: str, *, timeout: float | None = None
+        self,
+        before: str,
+        after: str,
+        expected: str,
+        *,
+        actions: list[str] | None = None,
+        timeout: float | None = None,
     ) -> Decision:
-        """succeeded / failed / still_loading for one step, from before/after screen text."""
-        state = {"expected": expected, "before": before, "after": after}
+        """succeeded / failed / still_loading for one step, from before/after screen text.
+
+        *actions* (optional) are the tool results of the step, e.g. "Type -> ok: Typed milk".
+        """
+        state: dict[str, Any] = {"expected": expected, "before": before, "after": after}
+        if actions:
+            state["actions"] = list(actions)
         return self.choose(state, VERIFY_INSTRUCTIONS, VERIFY_OPTIONS, timeout=timeout)

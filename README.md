@@ -837,6 +837,7 @@ Model specs are `provider:model`, with provider `anthropic` (key `ANTHROPIC_API_
 | `WINDOWS_MCP_ROUTER_MODEL` | `openrouter:microsoft/microsoft-decision-1` | Scorer for `Route` and `Do`'s final-screen check. Any chat model spec also works. `off` disables both. |
 | `WINDOWS_MCP_MODEL_TIMEOUT` | `15` | Seconds per model request (0.5 to 120). |
 | `WINDOWS_MCP_DO_EFFORT` | `low` | Anthropic `output_config.effort` for the `Do` model (`low` to `max`, `off` omits it). |
+| `WINDOWS_MCP_DO_THINKING` | _(unset)_ | `disabled` or `adaptive` thinking for the Anthropic `Do` model; unset leaves the model default. |
 
 ### Telemetry
 
