@@ -198,3 +198,12 @@ async def test_protected_call_can_run_while_background_is_running():
     finally:
         release.set()
         await asyncio.wait_for(task, 2)
+
+
+def test_app_skill_generate_is_a_screen_call():
+    from windows_mcp.tools.control_policy import category, is_screen_call
+
+    assert category("AppSkill", {"name": "notepad"}) == "possible"
+    assert is_screen_call("AppSkill", {"name": "notepad", "generate": True})
+    assert is_screen_call("AppSkill", {"name": "notepad", "regenerate": True})
+    assert not is_screen_call("Apps", {"mode": "list"})
