@@ -31,6 +31,9 @@ ABORT_CODES = (
     "CONTROL_PREEMPTED",
     "CONTROL_UNAVAILABLE",
     "SCREEN_BUSY",
+    # The scam guard wants the user's consent: only the outer caller can ask for it, so stop
+    # instead of letting the inner model try another way around the refusal.
+    "SCAM_GUARD_CONFIRM_REQUIRED",
 )
 
 SYSTEM_PROMPT = """You operate a Windows PC for one goal, using the tools provided. Speed matters \

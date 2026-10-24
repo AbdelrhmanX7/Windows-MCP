@@ -119,6 +119,28 @@ def test_control_errors_abort_immediately():
     assert summary["turns"] == 1
 
 
+def test_scam_guard_refusal_ends_the_run_for_the_caller_to_ask():
+    refusal = '{"code": "SCAM_GUARD_CONFIRM_REQUIRED", "domain": "rnicorsoft.com"}'
+    tools = FakeTools(fail={"Type": refusal})
+    summary, tools, _, _ = run(
+        "x",
+        [
+            turn(("Type", {"target": "Password", "text": "hunter2"})),
+            turn(("Click", {"loc": [500, 500]})),
+        ],
+        tools=tools,
+    )
+    assert summary["status"] == "blocked" and "SCAM_GUARD_CONFIRM_REQUIRED" in summary["answer"]
+    assert [c[0] for c in tools.calls] == ["Type"]  # no second try around the guard
+
+
+def test_inner_calls_cannot_pass_confirmed():
+    from windows_mcp.agent.tools import inner_args
+
+    for name in ("Type", "Click", "Shortcut"):
+        assert "confirmed" not in inner_args(name, {"confirmed": True, "text": "x", "loc": [1, 2]})
+
+
 def test_max_steps_and_unknown_tools():
     summary, tools, _, _ = run(
         "x",
