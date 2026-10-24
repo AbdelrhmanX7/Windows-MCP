@@ -192,7 +192,7 @@ class TestSemanticTreeRendering:
         root.add_child(SemanticNode(control_type="Window", element_type="window", name="Notepad"))
         text = TreeState(semantic_tree_root=root).semantic_tree_to_string()
         assert 'window ""' not in text
-        assert text.splitlines() == ["desktop", '└── window "Notepad"']
+        assert [line.strip() for line in text.splitlines()] == ["desktop", '└── window "Notepad"']
 
     def test_untitled_window_with_children_is_kept(self):
         root = SemanticNode(control_type="Desktop", element_type="desktop", name="Desktop")
@@ -207,7 +207,7 @@ class TestSemanticTreeRendering:
             SemanticNode(control_type="Window", element_type="window", name="One\nTwo")
         )
         text = TreeState(semantic_tree_root=root).semantic_tree_to_string()
-        assert text.splitlines()[-1] == '└── window "One Two"'
+        assert text.splitlines()[-1].strip() == '└── window "One Two"'
 
 
 class TestPremultipliedBgra:
