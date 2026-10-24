@@ -190,6 +190,14 @@
     {
       "name": "RunParallel",
       "description": "Runs several tool calls in one turn: background calls (FileSystem, PowerShell, Registry, Process list, App launch, Locate, ...) run concurrently with bounded concurrency and a per-call timeout, while screen calls (Click, Type, Scroll, Move, Shortcut, MultiSelect, MultiEdit, App switch/resize) run one at a time in order through the screen lock. Each inner call passes the same control gate and policy as a direct call; results return in input order with latency and error, and linked tasks update automatically."
+    },
+    {
+      "name": "Do",
+      "description": "Hands a small concrete desktop goal to a fast model running inside the server (default Claude Haiku 5.5; WINDOWS_MCP_DO_MODEL), which drives a compact subset of the server's own tools (Snapshot, Click/Type by target name, Shortcut, App, Scroll, Wait/WaitFor, PowerShell, AppSkill/Apps, Locate) in-process, so one call does many steps. Every inner call passes the control gate, policy and screen lock; Do holds the screen for its run. Optional decision-model verification of the final screen. Returns a transcript with per-step latency and model/tool/overhead timing; streams do_event progress."
+    },
+    {
+      "name": "Route",
+      "description": "Scores text against a fixed set of options with a fast decision model (default Microsoft-Decision-1 via OpenRouter's Decisions API; WINDOWS_MCP_ROUTER_MODEL) and returns the choice with calibrated per-option probabilities. Default options for a user utterance: direct_action, needs_plan, answer_only, clarify. mode='verify' checks a step from before/after screen text: succeeded, failed or still_loading."
     }
   ],
   "compatibility": {

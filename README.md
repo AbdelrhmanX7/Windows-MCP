@@ -839,6 +839,18 @@ sampling filters transient readings but cannot distinguish persistent query fail
 | `WINDOWS_MCP_GUARD_MODEL` | `microsoft/microsoft-decision-1` | OpenRouter Decisions model id. |
 | `WINDOWS_MCP_GUARD_TIMEOUT` | `1.5` | Seconds per model request. On timeout or error the local verdict stands. |
 
+### Do and Route (in-server models)
+
+Model specs are `provider:model`, with provider `anthropic` (key `ANTHROPIC_API_KEY`), `openrouter` (key `OPENROUTER_API_KEY`) or `script` (a JSON file of canned turns, for keyless tests). Nothing is sent to a provider until `Do` or `Route` is called.
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_DO_MODEL` | `anthropic:claude-haiku-5-5` | Inner model for `Do` (tool calling). `off` disables `Do`. E.g. `openrouter:anthropic/claude-haiku-5.5`, `openrouter:stepfun/step-3.7-flash`. |
+| `WINDOWS_MCP_ROUTER_MODEL` | `openrouter:microsoft/microsoft-decision-1` | Scorer for `Route` and `Do`'s final-screen check. Any chat model spec also works. `off` disables both. |
+| `WINDOWS_MCP_MODEL_TIMEOUT` | `15` | Seconds per model request (0.5 to 120). |
+| `WINDOWS_MCP_DO_EFFORT` | `low` | Anthropic `output_config.effort` for the `Do` model (`low` to `max`, `off` omits it). |
+| `WINDOWS_MCP_DO_THINKING` | _(unset)_ | `disabled` or `adaptive` thinking for the Anthropic `Do` model; unset leaves the model default. |
+
 ### Telemetry
 
 | Variable | Default | Description |
@@ -960,6 +972,8 @@ Bundled skills live in `src/windows_mcp/skills/builtin/` (File Explorer, Setting
 - `CheckLink`: Local, sub-millisecond phishing/lookalike check of a URL, domain or email address (or a list of up to 20) before opening a link or sending mail. Returns `verdict` (`safe`/`suspicious`/`dangerous`/`unknown`), `score` 0–100, `brand`, `reasons` and `ms`. Official brand domains are fast-pathed as safe. `second_opinion=true` waits (bounded by `WINDOWS_MCP_GUARD_TIMEOUT`) for the optional Microsoft-Decision-1 model on gray-zone targets. See [docs/INTEGRATION.md](docs/INTEGRATION.md#9-scam-guard).
 - `Tasks`: Track a multi-step request as a plan of dependent tasks (`plan`, `add`, `update`, `next`, `list`, `get`, `cancel`, `clear`, `events`). Validates the dependency graph (no cycles, no unknown ids), enforces status transitions, and splits ready tasks into a sequential screen lane and a parallel background lane. Every change emits a `task_event` (MCP log notification on logger `windows-mcp.tasks`, plus an optional JSON-lines file and webhook). Never gated, so the UI keeps updating during a user takeover. See [docs/INTEGRATION.md](docs/INTEGRATION.md).
 - `RunParallel`: Run several tool calls in one turn. Background calls run concurrently (bounded, per-call timeout); screen calls (`Click`, `Type`, `Scroll`, `Move`, `Shortcut`, `MultiSelect`, `MultiEdit`, `App` switch/resize) run one at a time, in order, through the screen lock. Each inner call passes the same control gate and policy as a direct call. Results come back in input order with per-call latency and error; calls with `task_id` update their task automatically.
+- `Do`: Hand a small, concrete goal ("open Notepad and type a grocery list") to a fast model inside the server (default Claude Haiku 5.5, `WINDOWS_MCP_DO_MODEL`). It drives `Snapshot`, `Click`/`Type` by target name, `Shortcut`, `App`, `Scroll`, `Wait`/`WaitFor`, `PowerShell`, `AppSkill`/`Apps` and `Locate` in-process, so one planner turn does many steps. Every inner call passes the same control gate, policy and screen lock as a direct call, and `Do` holds the screen for its whole run. Returns a short transcript (steps, latency, model vs tool time) and streams `do_event`s. Needs a provider key; without one it fails with "no model configured". See [docs/INTEGRATION.md](docs/INTEGRATION.md).
+- `Route`: Score text against fixed options with a decision model (default Microsoft-Decision-1 via OpenRouter, `WINDOWS_MCP_ROUTER_MODEL`) and get calibrated probabilities: route an utterance (`direct_action`, `needs_plan`, `answer_only`, `clarify`) or verify a step (`succeeded`, `failed`, `still_loading`). Needs `OPENROUTER_API_KEY` (or a chat model spec).
 
 Screen-touching tools never interleave, even when a client sends concurrent requests: a process-wide FIFO screen lock serializes them at the tool boundary and fails with `SCREEN_BUSY` after `WINDOWS_MCP_SCREEN_LOCK_TIMEOUT` seconds.
 

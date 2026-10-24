@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 28 tools via FastMCP:
+Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 30 tools via FastMCP:
 
 | Group | Tools |
 |---|---|
@@ -13,8 +13,8 @@ Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM 
 | Timing | `Wait`, `WaitFor` |
 | System | `App`, `PowerShell`, `FileSystem`, `Registry`, `Process`, `Clipboard`, `Notification`, `ControlStatus` |
 | Apps | `Apps` (installed-app inventory: list/info/refresh), `AppSkill` (per-app skill markdown; `generate`/`regenerate`) |
-| Orchestration | `Tasks` (plans of dependent tasks + live `task_event`s), `RunParallel` (concurrent background calls, ordered screen calls) |
 | Safety | `Context` (foreground window, browser URL/domain, focused field, email recipients + guard verdict), `CheckLink` (local phishing/lookalike check of a URL/domain/email) |
+| Orchestration | `Tasks` (plans of dependent tasks + live `task_event`s), `RunParallel` (concurrent background calls, ordered screen calls), `Do` (fast in-server model runs a multi-step goal), `Route` (decision-model scoring) |
 
 Tool names are defined by the `name=` argument of each `@mcp.tool(...)` in `src/windows_mcp/tools/`; that directory is the source of truth. Note the shell tool is registered as `PowerShell`, not `Shell`. Any subset can be removed at startup with `serve --exclude-tools` (e.g. `windows-mcp serve --exclude-tools PowerShell,Registry`).
 
@@ -51,6 +51,8 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 **Task orchestration** — `tasks/` (pure Python, no Windows imports): `store.py` holds plans (DAG validation, status state machine, `next` lane split, optional JSON persistence), `events.py` the event bus (seq/ts stamping, MCP log push keyed by connection, JSON-lines file, webhook worker thread, history ring for `Tasks(mode="events")`), `screen_lock.py` the process-wide FIFO screen lock, `parallel.py` the RunParallel executor, and `runtime.py` the singleton plus `OrchestrationMiddleware`. `tools/tasks.py` registers both tools and inserts that middleware outermost, so screen-touching calls (classified by `control_policy.is_screen_call`: DIRECT plus App switch/resize, unknown tools included) are serialized before the control gate runs. `Tasks` and `RunParallel` are in `control_policy.GATE_EXEMPT`: RunParallel dispatches each inner call through `mcp.call_tool`, so every inner call is gated, policy-checked, screen-locked and tracked on its own; gating the outer call would deadlock on the gate's non-reentrant lock.
 
 **Scam guard** — `guard/`: `domains.py` (URL/host/email parsing, registrable domain from the bundled Public Suffix List incl. private section, IDN/IP/userinfo handling), `confusables.py` (skeleton folding rn→m, 0→o, Cyrillic/Greek homoglyphs; bounded OSA distance), `detector.py` (pure scoring against `data/brands.json`, official domains fast-pathed as safe, scam-text rules, per-host LRU cache; `merge_model` only escalates), `model.py` (optional Microsoft-Decision-1 via OpenRouter `POST /api/alpha/decisions`, cached per domain, non-blocking), `service.py` (latest context + verdict, `security_event`s on the task event bus, gate decision), `context.py` (Windows: foreground/title via Win32, address bar via cached UIA element, focused field, recipients, page text only for non-safe pages), `watcher.py` (own STA thread + own UIA client, polling). `tools/guard.py` registers `Context`/`CheckLink`, installs `GuardGate` between the orchestration middleware and the control gate (refuses Type/MultiEdit/Click(target)/send-or-paste Shortcuts into a dangerous page or a suspicious login/recipient unless `confirmed=true`), and starts the watcher from the lifespan.
+
+**Models & Do** — `models/` (pure Python, `requests` only): `config.py` parses `provider:model` specs (`WINDOWS_MCP_DO_MODEL`, `WINDOWS_MCP_ROUTER_MODEL`), `http.py` keeps one keep-alive session per thread, `chat.py` has the tool-calling clients (Anthropic Messages API with prompt caching on tools+system and a rolling breakpoint, OpenRouter chat completions, a `script` replayer for tests), `decision.py` is the self-contained adapter for OpenRouter's Decisions API (`/api/alpha/decisions`, Microsoft-Decision-1), and `router.py` builds `route`/`verify` choices on it (or on any chat model). `agent/loop.py` is the `Do` loop (compact tool menu in `agent/tools.py`, append-only history, results clipped when appended, per-step `do_event`s); `tools/agent.py` registers `Do` and `Route`. `Do` is in `ORCHESTRATION` (gate-exempt, inner calls gated one by one through `mcp.call_tool`) but `is_screen_call("Do")` is true: the orchestration middleware holds the screen lock for the whole run and marks the context (`tasks/runtime.py` `_SCREEN_HELD`), so its inner screen calls re-enter instead of deadlocking.
 
 **WatchDog** — `watchdog/service.py`: Runs in a separate STA thread that polls the focused element (focus is not subscribed to; see #332) and can subscribe to structure/property UIAutomation events. Notifies the Tree service of focus changes so the accessibility tree stays current.
 
@@ -122,6 +124,11 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `WINDOWS_MCP_GUARD_MODEL` | `microsoft/microsoft-decision-1` | Decisions model id. Resolved in `guard/model.py`. |
 | `WINDOWS_MCP_GUARD_TIMEOUT` | `1.5` | Seconds per model request. Resolved in `guard/model.py`. |
 | `WINDOWS_MCP_POWERSHELL_SESSION` | `on` | Set to `off`/`0`/`false`/`no` to start a fresh PowerShell process per command instead of using the persistent session. Session semantics (state reset per command, timeout/respawn, one-shot fallback) are documented in `powershell/session.py`; resolved in `powershell/service.py`. |
+| `WINDOWS_MCP_DO_MODEL` | `anthropic:claude-haiku-5-5` | `Do` inner model, `provider:model` (`anthropic`, `openrouter`, `script`); `off` disables. Keys from `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`. Resolved in `models/config.py`. |
+| `WINDOWS_MCP_ROUTER_MODEL` | `openrouter:microsoft/microsoft-decision-1` | `Route` and Do's verifier; decision models use the Decisions API, chat models a JSON prompt. Resolved in `models/config.py`. |
+| `WINDOWS_MCP_MODEL_TIMEOUT` | `15` | Seconds per model request. Resolved in `models/config.py`. |
+| `WINDOWS_MCP_DO_EFFORT` | `low` | Anthropic effort for the Do model; `off` omits it. Resolved in `models/config.py`. |
+| `WINDOWS_MCP_DO_THINKING` | _(unset)_ | `disabled`/`adaptive` thinking for the Anthropic Do model; unset sends nothing. Resolved in `models/config.py`. |
 
 ## Security Context
 

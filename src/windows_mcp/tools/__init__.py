@@ -1,6 +1,7 @@
 """tools subpackage — registers all MCP tool definitions on a FastMCP instance."""
 
 from windows_mcp.tools import (
+    agent,
     app,
     apps,
     clipboard,
@@ -36,6 +37,7 @@ _MODULES = [
     apps,
     guard,
     tasks,
+    agent,
 ]
 
 
