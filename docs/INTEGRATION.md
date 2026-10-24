@@ -214,10 +214,10 @@ a 600 ms PowerShell "playlist lookup", Registry get, Process list) and a screen 
 
 | | wall time | MCP round trips |
 |---|---|---|
-| Same 8 calls one by one | 9.2 s | 8 |
-| One `RunParallel` | 7.1 s (sum of call latencies 13.2 s, x1.87) | 1 |
+| Same 8 calls one by one | 9.2 s / 10.7 s (two runs) | 8 |
+| One `RunParallel` | 7.1 s / 6.5 s (sum of call latencies 13.2 s / 12.0 s, x1.87 / x1.83) | 1 |
 
-The background work (2.4 s) was fully hidden behind the 7 s screen chain. The screen calls
+The background work (up to 2.4 s) was fully hidden behind the 6.5 to 7 s screen chain, which is dominated by the App launch (3.5 to 5.3 s; it slows down while PowerShell processes start in parallel). The screen calls
 never overlapped. The client received 27 events (1 `plan_event`, 26 `task_event`s), in `seq`
 order, and the JSONL file had the same 27. The bigger saving in practice is the seven LLM
 turns that were not needed (each costs one to several seconds of model latency).
