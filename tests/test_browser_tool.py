@@ -441,6 +441,11 @@ async def test_guard_off_skips_checks(svc, conn, events, monkeypatch):
 
 
 # ---------------------------------------------------------------------- launcher
+def test_listening_is_unknown_off_windows(monkeypatch):
+    monkeypatch.setattr(launcher.sys, "platform", "linux")
+    assert launcher.listening(9222) is None
+
+
 def test_launcher_env(monkeypatch, tmp_path):
     monkeypatch.setenv("WINDOWS_MCP_BROWSER_PORT", "9333")
     monkeypatch.setenv("WINDOWS_MCP_BROWSER_PROFILE", str(tmp_path / "p"))
@@ -456,6 +461,7 @@ def test_launcher_env(monkeypatch, tmp_path):
 
 def test_ensure_attaches_without_launching(monkeypatch):
     info = {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/x"}
+    monkeypatch.setattr(launcher, "listening", lambda port: None)
     monkeypatch.setattr(launcher, "probe", lambda port, timeout=0.3: info)
     monkeypatch.setattr(launcher, "launch", lambda *a, **k: pytest.fail("launched"))
     assert launcher.ensure_browser() == (info, False)
@@ -474,6 +480,7 @@ def test_ensure_launches_and_polls(monkeypatch, tmp_path):
             return None
 
     monkeypatch.setattr(launcher, "probe", lambda port, timeout=0.3: next(probes))
+    monkeypatch.setattr(launcher, "listening", lambda port: None)
     monkeypatch.setattr(launcher, "find_executable", lambda: "msedge.exe")
     monkeypatch.setattr(launcher, "launch", lambda *a, **k: launched.append(a) or Proc())
     assert launcher.ensure_browser() == (info, True)
