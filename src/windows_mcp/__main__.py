@@ -404,6 +404,9 @@ def _build_mcp() -> FastMCP:
 
         watchdog = _start_watchdog(desktop)
         _start_warmup(desktop)
+        from windows_mcp.tools.guard import start_guard, stop_guard
+
+        start_guard()  # Scam-guard watcher; WINDOWS_MCP_GUARD=0 turns it off.
 
         # Set thresholds before installing input hooks; invalid TOML was rejected at load.
         controller.mouse_takeover_units = _control_config.mouse_takeover_units
@@ -437,6 +440,7 @@ def _build_mcp() -> FastMCP:
                         control_overlay.stop()
                 finally:
                     logger.debug("Shutting down: stopping watchdog and analytics")
+                    stop_guard()
                     if watchdog:
                         watchdog.stop()
                     if analytics:

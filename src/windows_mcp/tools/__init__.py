@@ -7,6 +7,7 @@ from windows_mcp.tools import (
     control_status,
     display,
     filesystem,
+    guard,
     input,
     multi,
     notification,
@@ -33,6 +34,7 @@ _MODULES = [
     notification,
     registry,
     apps,
+    guard,
     tasks,
 ]
 

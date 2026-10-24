@@ -22,6 +22,8 @@ OTHER = frozenset(
         "DisplayInventory",
         "Locate",
         "Apps",
+        "Context",
+        "CheckLink",
     }
 )
 MODES = {

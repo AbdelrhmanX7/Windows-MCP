@@ -176,6 +176,14 @@
       "description": "Returns the markdown skill for an app: launch commands and URI deep links, keyboard shortcuts, recipes using these tools, and UI quirks. Resolves by skill name, app name, alias or process name with precedence builtin > user > generated. generate=true builds a skill from the app's menus and accessibility tree when none exists; regenerate=true rebuilds a generated one. Never overwrites builtin or user skills."
     },
     {
+      "name": "Context",
+      "description": "Read-only, fast: the foreground window (title, process, app kind), browser URL and registrable domain, focused field (name, type, is_password), Outlook/webmail To/Cc recipients, and the scam-guard verdict (safe|suspicious|dangerous|unknown, score, brand, reasons) for that site or recipient."
+    },
+    {
+      "name": "CheckLink",
+      "description": "Read-only, sub-millisecond local phishing/lookalike check of a URL, domain or email address (or a list) before opening a link or sending mail: confusable characters (rnicorsoft.com, paypa1.com), brand in a subdomain (microsoft.com.verify-login.xyz), user@host tricks, risky TLDs. Optional Microsoft-Decision-1 second opinion with OPENROUTER_API_KEY."
+    },
+    {
       "name": "Tasks",
       "description": "Tracks a multi-step request as a plan of dependent tasks (plan, add, update, next, list, get, cancel, clear, events). 'next' splits ready tasks into a sequential screen lane and a parallel background lane; every change is pushed live as a task_event (MCP log notification, optional JSON-lines file and webhook)."
     },
