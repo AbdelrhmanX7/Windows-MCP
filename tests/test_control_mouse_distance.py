@@ -115,6 +115,75 @@ def test_unusable_raw_event_does_not_count(monkeypatch):
     owner.checkpoint(token)
 
 
+def _fire_mouse(owner, x, y, wparam=0x200, flags=0):
+    data = control._MouseHookData()
+    data.pt.x, data.pt.y = x, y
+    data.flags = flags
+    return owner._physical_mouse(0, wparam, ctypes.addressof(data))
+
+
+def test_zero_delta_mouse_move_is_not_activity(monkeypatch):
+    """Receivers streaming stationary WM_MOUSEMOVE must not pin the gate in user (#498)."""
+    owner = control.ControlCoordinator()
+    owner._state = "ready"
+    monkeypatch.setattr(control._user32, "CallNextHookEx", lambda *args: 0)
+    clock = [10.0]
+    monkeypatch.setattr(control_hooks.time, "monotonic", lambda: clock[0])
+    _fire_mouse(owner, 500, 500)
+    assert owner._last_physical_event == 10.0
+    assert owner._events.get_nowait() == ("point", 500, 500, 0x200)
+    for _ in range(20):
+        clock[0] += 0.015
+        _fire_mouse(owner, 500, 500)
+    assert owner._last_physical_event == 10.0
+    assert owner._events.empty()
+    clock[0] = 11.0
+    _fire_mouse(owner, 520, 530)
+    assert owner._last_physical_event == 11.0
+    assert owner._events.get_nowait() == ("point", 520, 530, 0x200)
+    clock[0] = 12.0
+    _fire_mouse(owner, 520, 530, wparam=0x201)  # A click without motion is still input.
+    assert owner._last_physical_event == 12.0
+    assert owner._events.get_nowait() == ("point", 520, 530, 0x201)
+
+
+def test_zero_delta_report_after_injected_move_is_not_activity(monkeypatch):
+    owner = control.ControlCoordinator()
+    monkeypatch.setattr(control._user32, "CallNextHookEx", lambda *args: 0)
+    _fire_mouse(owner, 900, 400, flags=1)  # AI moved the cursor here.
+    _fire_mouse(owner, 900, 400)
+    assert owner._last_physical_event == 0.0
+    assert owner._events.empty()
+
+
+def test_zero_delta_mouse_move_lets_idle_user_return_to_ready(monkeypatch):
+    owner = control.ControlCoordinator()
+    owner.idle_timeout_seconds = 0.5
+    monkeypatch.setattr(control._user32, "CallNextHookEx", lambda *args: 0)
+    clock = [10.0]
+    monkeypatch.setattr(control_hooks.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(control.time, "monotonic", lambda: clock[0])
+    owner._state = "ready"
+    _fire_mouse(owner, 5, 5)
+    owner._handle(owner._events.get_nowait())
+    assert owner.status()["state"] == "user"
+    for _ in range(50):
+        clock[0] += 0.015
+        _fire_mouse(owner, 5, 5)
+        while not owner._events.empty():
+            owner._handle(owner._events.get_nowait())
+    assert owner.status()["state"] == "ready"
+
+
+def test_zero_delta_raw_event_is_not_activity(monkeypatch):
+    owner, token = owner_ready()
+    monkeypatch.setattr(control_hooks, "_read_raw_mouse", lambda _: (1, 0, 0))
+    owner._raw_input(0)
+    assert owner._last_physical_event == 0.0
+    assert owner._events.empty()
+    owner.checkpoint(token)
+
+
 @pytest.mark.parametrize("last_step,blocked", [(199, False), (200, True)])
 async def test_mcp_affine_tool_continues_below_threshold_and_stops_at_threshold(last_step, blocked):
     """Real MCP gate and UIA dispatch; physical input effects are simulated."""
