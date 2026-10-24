@@ -354,11 +354,11 @@ class TestCachedScrollState:
             VerticallyScrollable=True,
             HorizontallyScrollable=True,
             VerticalScrollPercent=10.0,
-            HorizontalScrollPercent=55.555,
+            HorizontalScrollPercent=55.254,
         )
         assert _cached_scroll_state(node) == {
             "horizontal_scrollable": True,
-            "horizontal_scroll_percent": 55.56,
+            "horizontal_scroll_percent": 55.25,
             "vertical_scrollable": True,
             "vertical_scroll_percent": 10.0,
         }
