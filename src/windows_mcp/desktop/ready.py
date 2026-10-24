@@ -57,11 +57,13 @@ logger = logging.getLogger(__name__)
 READY_TIMEOUT_ENV = "WINDOWS_MCP_READY_TIMEOUT"
 DEFAULT_READY_TIMEOUT_S = 3.0
 MAX_READY_TIMEOUT_S = 30.0
-POLL_S = 0.03
+POLL_S = 0.02
 # A change counts as finished once the window, title and load state stayed the same this long.
-STABLE_S = 0.06
-# Launch: the new window's title must hold still a little longer (apps retitle while starting).
-LAUNCH_STABLE_S = 0.15
+STABLE_S = 0.03
+# Once a navigation has committed (the window title changed to the new page), this is how
+# long the load event may still take before the page counts as shown: search result pages
+# keep the "Stop" state for seconds while ads and images load, long after they are usable.
+POST_COMMIT_S = 0.6
 WAIT_MIN_S = 0.1
 WAIT_IDLE_S = 0.1
 
@@ -131,7 +133,7 @@ class Settled:
 
     note: str
     elapsed: float
-    state: str  # "loaded" | "window" | "title" | "ready" | "loading" | "changing"
+    state: str  # "loaded" | "shown" | "window" | "title" | "ready" | "loading" | "changing"
 
 
 def _clean(title: str) -> str:
@@ -326,8 +328,8 @@ class Readiness:
         Args:
             before: :meth:`before` sample from just before the action (None: readiness off).
             watch: Seconds to keep looking for a change to start (0 = one sample).
-            launched: The action opened a window: wait for its title to hold still even if
-                nothing else changes, but do not wait for a browser's start page to load.
+            launched: The action opened a window (already found and focused by the caller):
+                describe it without waiting for a browser's start page to load.
             timeout: Override for the bounded wait (defaults to ``WINDOWS_MCP_READY_TIMEOUT``).
             checkpoint: Called on every poll; may raise to abort (user took control).
 
@@ -340,18 +342,27 @@ class Readiness:
         start = self._clock()
         deadline = start + limit
         watch_end = start + watch
-        stable_for = LAUNCH_STABLE_S if launched else STABLE_S
+        stable_for = 0.0 if launched else STABLE_S
         cur = self.sample()
         busy = cur.loading and not launched
         changed = launched or busy or not cur.same_window(before)
         saw_loading = busy
         last, last_change = cur, start
+        committed_at = start if busy and cur.title != before.title else None
         while True:
             now = self._clock()
             if not changed and now >= watch_end:
                 return None
             if changed and not busy and now - last_change >= stable_for:
                 return self._describe(before, cur, saw_loading, now - start, launched)
+            if busy and committed_at is not None and now - committed_at >= POST_COMMIT_S:
+                elapsed = now - start
+                return Settled(
+                    f'Page shown: "{_short(cur.title)}" ({elapsed:.1f} s; images/ads may '
+                    "still be loading).",
+                    elapsed,
+                    "shown",
+                )
             if now >= deadline:
                 return self._describe(before, cur, saw_loading, now - start, launched, busy)
             if checkpoint is not None:
@@ -361,6 +372,8 @@ class Readiness:
             busy = cur.loading and not launched
             if busy:
                 saw_loading = True
+                if committed_at is None and cur.browser and cur.title != before.title:
+                    committed_at = self._clock()
             if not changed:
                 if busy or not cur.same_window(before):
                     changed = True

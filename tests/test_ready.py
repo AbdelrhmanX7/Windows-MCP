@@ -108,15 +108,26 @@ class TestAfter:
         assert settled.note.startswith('Window "Save As" is now in front')
         assert settled.elapsed < 0.25
 
-    def test_launch_waits_for_title_to_hold_still_but_not_for_page_load(self):
+    def test_launch_describes_the_window_without_waiting_for_the_start_page(self):
         clock = Clock()
-        starting = Sample(hwnd=5, title="Microsoft Edge", browser=True, loading=True)
         titled = Sample(hwnd=5, title="New tab - Microsoft Edge", browser=True, loading=True)
-        r = make(clock, [(0, starting), (0.1, titled)])
+        r = make(clock, [(0, titled)])
         settled = r.after(Sample(), launched=True, timeout=1.5)
         assert settled.state == "ready"
         assert '"New tab - Microsoft Edge"' in settled.note
-        assert settled.elapsed < 0.4
+        assert clock.slept == []
+
+    def test_committed_page_counts_as_shown_while_extras_load(self):
+        clock = Clock()
+        pending = Sample(hwnd=1, title=EDGE.title, browser=True, loading=True)
+        committed = Sample(
+            hwnd=1, title="todo - Search - Microsoft Edge", browser=True, loading=True
+        )
+        r = make(clock, [(0, pending), (0.5, committed)])
+        settled = r.after(EDGE)
+        assert settled.state == "shown"
+        assert settled.note.startswith('Page shown: "todo - Search')
+        assert 1.1 <= settled.elapsed < 1.2
 
     def test_disabled(self):
         clock = Clock()

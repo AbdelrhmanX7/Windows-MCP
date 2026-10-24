@@ -126,7 +126,9 @@ to run concurrently.
 for what they started: a browser page load (Edge/Chrome reload button in its "Stop" state, the
 document's `busy`), a dialog or window taking the foreground, a title change. The result says
 what happened, e.g. `Typed ... Enter pressed. Page loaded: "todo list - Search" (0.8 s).` or
-`Pressed ctrl+s. Window "Save As" is now in front (0.1 s).` When nothing changed they return
+`Pressed ctrl+s. Window "Save As" is now in front (0.1 s).` A page whose new document is up
+but whose load event lags (search results loading ads) returns 0.6 s after it appeared as
+`Page shown: "..."`. When nothing changed they return
 after one sample (about 1 ms), so plain typing is not slowed down. The planner should not
 call `Wait` after an action; `Wait` itself returns "UI already idle" after 0.1 s when nothing
 is in flight.
