@@ -202,7 +202,9 @@ def ensure_browser(url: str | None = None) -> tuple[dict, bool]:
     browser endpoint.
     """
     port = browser_port()
-    info = probe(port) if listening(port) is not False else None
+    # A live local browser answers /json/version in a few ms; a short timeout keeps a
+    # port forwarder that accepts but never answers from costing more.
+    info = probe(port, timeout=0.15) if listening(port) is not False else None
     if info:
         return info, False
     profile = profile_dir()
@@ -212,15 +214,24 @@ def ensure_browser(url: str | None = None) -> tuple[dict, bool]:
         if info:
             return info, False
     exe = find_executable()
+    marker = profile / "DevToolsActivePort"
+    try:
+        marker.unlink()  # Stale from a killed browser; Chromium rewrites it once listening.
+    except OSError:
+        pass
     proc = launch(exe, port, profile, url)
     deadline = time.monotonic() + LAUNCH_TIMEOUT
+    next_probe = time.monotonic() + 0.5
     while time.monotonic() < deadline:
-        info = probe(port, timeout=0.5) if listening(port) is not False else None
-        if info:
-            return info, True
+        now = time.monotonic()
+        if marker.exists() or now >= next_probe:
+            next_probe = now + 0.25
+            info = probe(port, timeout=0.5) if listening(port) is not False else None
+            if info:
+                return info, True
         if proc.poll() is not None and proc.returncode not in (0, None):
             raise LaunchError(f"{exe} exited with code {proc.returncode}")
-        time.sleep(0.03)
+        time.sleep(0.01)
     raise LaunchError(
         f"{Path(exe).name} did not open a debugging port on {port} within "
         f"{LAUNCH_TIMEOUT:g}s. If a browser is already running on profile {profile} without "
