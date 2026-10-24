@@ -62,6 +62,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "windows_mcp.skills" = ["builtin/*.md"]
+"windows_mcp.guard" = ["data/*.json", "data/*.dat"]
 
 [tool.ruff]
 line-length = 100

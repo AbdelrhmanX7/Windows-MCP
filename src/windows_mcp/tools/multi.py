@@ -56,7 +56,7 @@ def register(mcp, *, get_desktop, get_analytics):
 
     @mcp.tool(
         name="MultiEdit",
-        description="Enters text into multiple input fields at specified coordinates locs=[[x,y,text], ...] or using labels=[[label,text], ...]. Provide either locs or labels.",
+        description="Enters text into multiple input fields at specified coordinates locs=[[x,y,text], ...] or using labels=[[label,text], ...]. Provide either locs or labels. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning.",
         annotations=ToolAnnotations(
             title="MultiEdit",
             readOnlyHint=False,
@@ -69,8 +69,10 @@ def register(mcp, *, get_desktop, get_analytics):
     def multi_edit_tool(
         locs: list[list] | str | None = None,
         labels: list[list] | str | None = None,
+        confirmed: bool | str = False,
         ctx: Context = None,
     ) -> str:
+        _as_bool(confirmed, "confirmed")  # Read by the scam-guard gate (tools/guard.py).
         desktop = get_desktop()
         locs = _as_loc(locs)
         labels = _as_loc(labels)

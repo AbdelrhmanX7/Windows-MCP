@@ -274,7 +274,7 @@ def register(
             "in ~100 ms, so no Snapshot is needed first; 'File > Save As' clicks a menu chain. "
             "Optional control_type (button, edit, menu, tab, link, checkbox, ...) and nth "
             "(1-based, reading order) disambiguate. On a weak match nothing is clicked and the "
-            "top candidates are returned."
+            "top candidates are returned. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning."
         ),
         annotations=ToolAnnotations(
             title="Click",
@@ -294,8 +294,10 @@ def register(
         control_type: str | None = None,
         window: str | None = None,
         nth: int | None = None,
+        confirmed: bool | str = False,
         ctx: Context = None,
     ) -> str:
+        _as_bool(confirmed, "confirmed")  # Read by the scam-guard gate (tools/guard.py).
         desktop = get_desktop()
         loc = _as_loc(loc)
         num_clicks = {0: "Hover", 1: "Single", 2: "Double"}
@@ -391,7 +393,7 @@ def register(
 
     @mcp.tool(
         name="Type",
-        description="Types text at specified coordinates [x, y] or passing a UI element's label/id. Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing. Set caret_position to 'start' (beginning), 'end' (end), or 'idle' (default). Provide exactly one of loc, label or target; target names the field in words (e.g. 'search box', 'File name') and is resolved like Click(target=...), preferring edit fields, with optional control_type, window and nth. clear and press_enter accept only true or false. An empty text types nothing, so combine it with clear=True to just empty a field.",
+        description="Types text at specified coordinates [x, y] or passing a UI element's label/id. Set clear=True to clear existing text first, False to append. Set press_enter=True to submit after typing. Set caret_position to 'start' (beginning), 'end' (end), or 'idle' (default). Provide exactly one of loc, label or target; target names the field in words (e.g. 'search box', 'File name') and is resolved like Click(target=...), preferring edit fields, with optional control_type, window and nth. clear and press_enter accept only true or false. An empty text types nothing, so combine it with clear=True to just empty a field. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning.",
         annotations=ToolAnnotations(
             title="Type",
             readOnlyHint=False,
@@ -412,8 +414,10 @@ def register(
         control_type: str | None = None,
         window: str | None = None,
         nth: int | None = None,
+        confirmed: bool | str = False,
         ctx: Context = None,
     ) -> str:
+        _as_bool(confirmed, "confirmed")  # Read by the scam-guard gate (tools/guard.py).
         desktop = get_desktop()
         loc = _as_loc(loc)
         clear = _as_bool(clear, "clear")
@@ -575,7 +579,7 @@ def register(
 
     @mcp.tool(
         name="Shortcut",
-        description='Executes keyboard shortcuts using key combinations separated by +. Examples: "ctrl+c" (copy), "ctrl+v" (paste), "alt+tab" (switch apps), "win+r" (Run dialog), "win" (Start menu), "ctrl+shift+esc" (Task Manager). Use for quick actions and system commands.',
+        description='Executes keyboard shortcuts using key combinations separated by +. Examples: "ctrl+c" (copy), "ctrl+v" (paste), "alt+tab" (switch apps), "win+r" (Run dialog), "win" (Start menu), "ctrl+shift+esc" (Task Manager). Use for quick actions and system commands. Set confirmed=true only after the user approved a scam-guard (SCAM_GUARD_CONFIRM_REQUIRED) warning.',
         annotations=ToolAnnotations(
             title="Shortcut",
             readOnlyHint=False,
@@ -585,7 +589,8 @@ def register(
         ),
     )
     @with_analytics(get_analytics(), "Shortcut-Tool")
-    def shortcut_tool(shortcut: str, ctx: Context = None):
+    def shortcut_tool(shortcut: str, confirmed: bool | str = False, ctx: Context = None):
+        _as_bool(confirmed, "confirmed")  # Read by the scam-guard gate (tools/guard.py).
         get_desktop().shortcut(shortcut)
         return f"Pressed {shortcut}."
 

@@ -656,7 +656,7 @@ is still accepted for compatibility but no longer affects takeover.
 | `strict` (C) | All tools except ControlStatus, matching the previous gate behavior. |
 
 FileSystem, Registry, Snapshot, Screenshot, Scrape, Wait, WaitFor, DisplayInventory, Apps,
-Process `list`, and Clipboard `get` bypass ownership in A and B. This classification
+Context, CheckLink, Process `list`, and Clipboard `get` bypass ownership in A and B. This classification
 concerns desktop interference, not permissions or data safety. PowerShell can still
 operate the UI, and file/registry operations can have other side effects.
 
@@ -827,6 +827,16 @@ sampling filters transient readings but cannot distinguish persistent query fail
 | `WINDOWS_MCP_PARALLEL_TIMEOUT` | `60` | Default per-call timeout (seconds) for `RunParallel` background calls. |
 | `WINDOWS_MCP_SCREEN_LOCK_TIMEOUT` | `60` | Seconds a screen-touching call waits for the screen lock before failing with `SCREEN_BUSY`. |
 
+### Scam guard
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_GUARD` | `on` | Set to `0`/`false`/`off` to disable the guard watcher, `security_event`s and the confirm-before-risky-input gate. `Context` and `CheckLink` still work on demand. |
+| `WINDOWS_MCP_GUARD_EVENTS` | `risky` | `risky` emits a `security_event` when a page or recipient is suspicious/dangerous and when it returns to safe; `all` emits on every site/recipient change. |
+| `OPENROUTER_API_KEY` | _(none)_ | Enables the Microsoft-Decision-1 second opinion for gray-zone pages only. Absent means local verdicts only. Only the domain, page title and a clipped text excerpt are sent. |
+| `WINDOWS_MCP_GUARD_MODEL` | `microsoft/microsoft-decision-1` | OpenRouter Decisions model id. |
+| `WINDOWS_MCP_GUARD_TIMEOUT` | `1.5` | Seconds per model request. On timeout or error the local verdict stands. |
+
 ### Telemetry
 
 | Variable | Default | Description |
@@ -944,6 +954,8 @@ uri_schemes: [spotify]     # without the trailing colon
 ```
 
 Bundled skills live in `src/windows_mcp/skills/builtin/` (File Explorer, Settings, Edge, Chrome, Notepad, Calculator, Spotify, Word, Excel, PowerPoint, Outlook, Teams, VS Code, Discord, Windows Terminal/PowerShell, Paint, Snipping Tool, Task Manager). Drop your own `.md` files into the user skill folder (`WINDOWS_MCP_SKILLS_DIR`); generated skills are written there too, with `source: generated`. The frontmatter is a deliberately small YAML subset (scalars, inline or block lists, one nested `match` map), so other tools can index or write skills without a YAML library.
+- `Context`: Where the user is right now, in a few milliseconds: foreground window (title, process, app kind), the browser URL and registrable domain (Edge/Chrome/Brave/Firefox address bar), the focused field (name, control type, `is_password`), To/Cc recipients in Outlook or webmail compose, and the scam-guard verdict for that site or recipient. Served from the background guard watcher when fresh (`cached: true`); `refresh=true` forces a new read. Read-only.
+- `CheckLink`: Local, sub-millisecond phishing/lookalike check of a URL, domain or email address (or a list of up to 20) before opening a link or sending mail. Returns `verdict` (`safe`/`suspicious`/`dangerous`/`unknown`), `score` 0–100, `brand`, `reasons` and `ms`. Official brand domains are fast-pathed as safe. `second_opinion=true` waits (bounded by `WINDOWS_MCP_GUARD_TIMEOUT`) for the optional Microsoft-Decision-1 model on gray-zone targets. See [docs/INTEGRATION.md](docs/INTEGRATION.md#9-scam-guard).
 - `Tasks`: Track a multi-step request as a plan of dependent tasks (`plan`, `add`, `update`, `next`, `list`, `get`, `cancel`, `clear`, `events`). Validates the dependency graph (no cycles, no unknown ids), enforces status transitions, and splits ready tasks into a sequential screen lane and a parallel background lane. Every change emits a `task_event` (MCP log notification on logger `windows-mcp.tasks`, plus an optional JSON-lines file and webhook). Never gated, so the UI keeps updating during a user takeover. See [docs/INTEGRATION.md](docs/INTEGRATION.md).
 - `RunParallel`: Run several tool calls in one turn. Background calls run concurrently (bounded, per-call timeout); screen calls (`Click`, `Type`, `Scroll`, `Move`, `Shortcut`, `MultiSelect`, `MultiEdit`, `App` switch/resize) run one at a time, in order, through the screen lock. Each inner call passes the same control gate and policy as a direct call. Results come back in input order with per-call latency and error; calls with `task_id` update their task automatically.
 

@@ -115,6 +115,8 @@ to run concurrently.
 | `Clipboard` | background | Get or set the clipboard. |
 | `Notification` | background | Show a toast. |
 | `ControlStatus` | local | Who controls the desktop (AI or user) and the remaining idle wait. |
+| `Context` | background | Where the user is: foreground window, browser URL/domain, focused field (`is_password`), email recipients, plus the scam-guard verdict. A few ms. |
+| `CheckLink` | background | Local phishing/lookalike check of a URL, domain or email address (or a list); sub-millisecond. |
 | `Apps` / `AppSkill` | background; `AppSkill(generate/regenerate=true)`: screen | Available. Per-app skills (URI schemes, CLI/COM recipes, known shortcuts) so the planner can do common app actions without UI exploration. |
 
 `Click(target=...)`, `Type(target=...)` and `Locate` (the click resolver) are available on
@@ -351,6 +353,10 @@ tool turns as possible.
 5. After each RunParallel, call Tasks(mode="next") only if the next step is not obvious.
    Retry a failed task once with a different route, then mark it failed with a clear error.
 6. When the plan is done, reply to the user in one or two sentences.
+7. Before opening a link or emailing an address you did not get from the user, run
+   CheckLink on it. If a tool fails with SCAM_GUARD_CONFIRM_REQUIRED, stop, tell the user
+   what was detected (domain, brand, reasons) and retry with confirmed=true only after they
+   explicitly say to go ahead.
 ```
 
 ## 8. Latency tips
@@ -367,3 +373,150 @@ tool turns as possible.
 - **Use `WaitFor`, not polling,** when an app needs time to appear.
 - **Keep `--control` on and the policy `relaxed`.** `--no-control` serializes every tool, and `balanced`/`strict` serialize more of them.
 - **Use stateless HTTP only with the webhook.** Pushed events need a session.
+
+## 9. Scam guard
+
+The server knows which website or email recipient the user is on and flags lookalikes such as
+`rnicorsoft.com` (imitating microsoft), `paypa1.com`, `microsoft.com.verify-login.xyz`,
+`https://microsoft.com@evil.xyz` or an email to `support@rnicorsoft.com`. It refuses to type
+into or send to them until the user confirms. Nothing new is needed on the backend: verdicts
+arrive as `security_event`s on the same event bus as `task_event`s.
+
+### Pieces
+
+| Piece | What it does | Cost |
+|---|---|---|
+| Local detector (`guard/detector.py`) | Registrable domain (bundled Public Suffix List, private section included, so `evil.github.io` is not `github.io`), IDN/punycode, IP literals, `user@host` and `host\@brand` tricks, confusable skeleton (`rn`→`m`, `vv`→`w`, `cl`→`d`, `0`→`o`, `1`→`l`, Cyrillic/Greek homoglyphs), edit distance to ~250 brands' labels, brand in a subdomain or hyphenated label, embedded real domain, risky TLDs and hosting suffixes, hyphens, http, password field, tech-support-scam text. Official brand domains are fast-pathed as safe. No network. | well under 1 ms; cached hosts a few µs |
+| Watcher (`guard/watcher.py`) | Own UI Automation thread. Polls the foreground window/title (Win32) every 100 ms, the focused element every 300 ms and the address bar every 1.5 s, debounced; re-probes only on change. Reads page text only for pages that are not known-safe. | idle: microseconds per tick |
+| Second opinion (`guard/model.py`) | Microsoft-Decision-1 via OpenRouter, gray zone only (suspicious, or an unknown site with a password field or scam-like text). Runs in the background, cached per domain for 15 min, and can only raise severity. | ~300 ms warm, off the fast path |
+| Gate (`tools/guard.py` `GuardGate`) | Middleware between the orchestration layer and the control gate. | reads cached state; one probe only when the foreground window/tab changed |
+
+### Tools
+
+`Context(refresh=false, include_text=false)` returns JSON:
+
+```json
+{"window": {"title": "Sign in to your account - Microsoft Edge", "process": "msedge.exe",
+            "app": "browser", "product": "edge"},
+ "url": "https://rnicorsoft.com/login", "domain": "rnicorsoft.com",
+ "focused": {"name": "Password", "control_type": "Edit", "is_password": true,
+             "address_bar": false},
+ "recipients": [], "page_text_chars": 412,
+ "guard": {"verdict": "dangerous", "score": 100, "brand": "Microsoft",
+           "reasons": ["'rnicorsoft' imitates 'microsoft' (look-alike characters)",
+                       "asks for a password on a look-alike site"],
+           "ms": 0.14, "domain": "rnicorsoft.com", "host": "rnicorsoft.com", "kind": "url",
+           "official": false, "gray": false},
+ "source": "browser", "cached": true, "probe_ms": 12.4, "ms": 0.3}
+```
+
+`cached: true` means the watcher's context was reused (same window and tab title, under 2 s
+old). `app` is `browser`, `email` (Outlook classic `outlook.exe`, new Outlook `olk.exe`, or a
+webmail compose with recipients) or `other`. Page text is never returned, only its length.
+
+`CheckLink(target, second_opinion=false)` takes a URL, bare domain, email address,
+`Name <addr>` or `mailto:` (or a list of up to 20) and returns the `guard` object above plus
+`target`. With `second_opinion=true` and a key, gray-zone targets wait up to
+`WINDOWS_MCP_GUARD_TIMEOUT` for the model. Without it, a background request is started so the
+next check (or the watcher) gets the cached answer.
+
+Verdicts: `safe` (official or well-known site), `unknown` (no signals; most of the web),
+`suspicious` (score 35–69) and `dangerous` (score 70+). Edit distance alone ("one typo
+away") is at most `suspicious`. `dangerous` needs look-alike characters or a second signal.
+
+### Confirm before risky input
+
+These calls are refused with a `ToolError` while the current context is `dangerous`, or
+`suspicious` with a focused password field or an email recipient:
+
+- `Type`, `MultiEdit`
+- `Click(target=...)` (clicks by coordinates or label are not gated)
+- `Shortcut` for send/submit/paste keys: `enter`, `ctrl+enter`, `alt+s`, `ctrl+v`,
+  `shift+insert`, `ctrl+shift+v`, `ctrl+shift+enter`
+
+The error text is JSON:
+
+```json
+{"code": "SCAM_GUARD_CONFIRM_REQUIRED", "verdict": "dangerous", "score": 100,
+ "domain": "rnicorsoft.com", "brand": "Microsoft", "source": "browser", "recipient": null,
+ "reasons": ["'rnicorsoft' imitates 'microsoft' (look-alike characters)"],
+ "message": "Blocked: this would type into or send the page rnicorsoft.com, which looks dangerous imitating Microsoft. Tell the user what was detected and ask whether to continue. Only after they explicitly approve, retry the same call with confirmed=true."}
+```
+
+All four tools accept `confirmed` (`true` or `"true"` only). A confirmed call goes through and
+emits a `security_event` with `event: "user_confirmed"` for the audit trail. Calls inside
+`RunParallel` are gated one by one, like the control gate.
+
+### `security_event`
+
+Same `seq` space, MCP log notifications (logger `windows-mcp.tasks`), JSON-lines file and
+webhook as `task_event`. `Tasks(mode="events")` returns them too.
+
+```json
+{"type": "security_event", "event": "verdict", "seq": 41, "ts": 1792806634741,
+ "verdict": "dangerous", "score": 100, "domain": "rnicorsoft.com", "brand": "Microsoft",
+ "reasons": ["'rnicorsoft' imitates 'microsoft' (look-alike characters)",
+             "asks for a password on a look-alike site"],
+ "source": "browser", "url": "https://rnicorsoft.com/login", "app": "browser",
+ "process": "msedge.exe", "title": "Sign in to your account", "password_field": true,
+ "local_ms": 0.14,
+ "model": {"choice": "phishing", "probabilities": {"legit": 0.0015, "phishing": 0.9959,
+           "tech_support_scam": 0.0002, "unsure": 0.0025}, "confidence": 0.99,
+           "model": "microsoft/microsoft-decision-1-20261009", "ms": 290.0}}
+```
+
+| Field | Notes |
+|---|---|
+| `event` | `verdict` (the context's verdict changed) or `user_confirmed` (a gated call went ahead with `confirmed=true`; it also carries `tool`). |
+| `verdict`, `score`, `brand`, `reasons` | As in `CheckLink`. `brand` is the imitated brand, or the real one on an official site. |
+| `source` | `browser` or `email`. |
+| `url` | Browser only, clipped to 500 characters. The address bar often hides the scheme. |
+| `recipient` | Email only: the riskiest To/Cc address. |
+| `password_field` | The focused element is a password box. |
+| `model` | Present on the follow-up event when the second opinion arrived. Expect a local event first and a model event a few hundred ms later, with the same `domain`. |
+
+With the default `WINDOWS_MCP_GUARD_EVENTS=risky`, events are sent when a context becomes
+suspicious or dangerous, when that verdict changes, and once when the user is back on a
+non-risky site (so a UI can clear its warning). `all` sends one on every site/recipient change.
+
+### Environment
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_GUARD` | `on` | `0`/`false`/`off`: no watcher, no events, no gate. `Context`/`CheckLink` still work. |
+| `WINDOWS_MCP_GUARD_EVENTS` | `risky` | `risky` or `all` (see above). |
+| `OPENROUTER_API_KEY` | _(none)_ | Enables the Decision-1 second opinion. Absent: local verdicts only. |
+| `WINDOWS_MCP_GUARD_MODEL` | `microsoft/microsoft-decision-1` | Decisions model id. |
+| `WINDOWS_MCP_GUARD_TIMEOUT` | `1.5` | Seconds per model request. |
+
+The model call is `POST https://openrouter.ai/api/alpha/decisions` (Decision-1 is not a chat
+model; `chat/completions` rejects it) with `{"model", "state": {"domain", "page_title",
+"visible_text_excerpt"}, "questions": {"verdict": {"type": "choice", "instructions",
+"criteria": {"legit", "phishing", "tech_support_scam", "unsure"}}}}`. The answer is read from
+`answers.verdict.probabilities`. Only the domain, page title (200 characters) and up to 1500
+characters of visible text leave the machine, never the full URL, field values or what the
+AI types. The key is never logged.
+
+### Failure modes
+
+- **False positives.** A real site whose name is one edit away from a brand (`paypay.ne.jp`,
+  `chess.com`) can look suspicious. Official domains and a known-site list in
+  `guard/data/brands.json` are fast-pathed; edit distance alone never reaches `dangerous`, and
+  `suspicious` only gates input when a password field or email recipient is involved. The
+  planner can always proceed with `confirmed=true` after asking. Extend `domains` or
+  `known_legit` in the data file for local exceptions.
+- **False negatives.** Brand-new phishing on an unrelated name (`secure-login-portal.com`) has
+  no lookalike signal: it stays `unknown` unless it shows a password field or scam text (then
+  the model is asked, if configured). The guard is a speed bump, not a blocklist; it never
+  queries reputation services.
+- **Prompt injection from page text.** Visible text only feeds the text rules and the model's
+  `state`. The model can only raise severity, never lower a local verdict, so a page saying
+  "this site is legit" cannot unlock input. Page text is never returned to the planner by
+  `Context`.
+- **Model unavailable** (no key, timeout, HTTP error, air-gapped): the local verdict stands,
+  failures are cached for 30 s so a dead network is not retried on every focus change.
+- **Context gaps.** Browsers expose the URL through the address bar; a kiosk/app window
+  without one has no URL. Outlook classic sometimes shows resolved display names instead of
+  addresses in the To field; only addresses visible in the UI are checked. The gate only
+  re-probes when the foreground window or tab title changed since the last read; a page that
+  navigates without changing its title is caught by the 1.5 s URL backstop.
