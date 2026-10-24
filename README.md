@@ -660,6 +660,10 @@ Process `list`, and Clipboard `get` bypass ownership in A and B. This classifica
 concerns desktop interference, not permissions or data safety. PowerShell can still
 operate the UI, and file/registry operations can have other side effects.
 
+`Tasks` (local task state) is never gated, like `ControlStatus`. `RunParallel` is not gated
+itself; each of its inner calls passes the gate individually, and a whole batch is
+rejected up front during a user takeover when its strictest inner call needs ownership.
+
 Ungated calls do not acquire or extend the desktop lease, activate its indicator,
 or wait for its tool lock. Existing resource constraints still apply: UI Automation
 operations share a dedicated worker, so a long WaitFor can delay other UIA work.
