@@ -32,6 +32,8 @@ _WDA_EXCLUDEFROMCAPTURE = 0x00000011
 _BLUE = (45, 145, 255)
 _AMBER = (255, 170, 55)
 
+_render_failures_logged: set[str] = set()
+
 _user32 = ctypes.windll.user32
 # wintypes.POINT, not flash_overlay._POINT: ctypes.windll caches one user32 object per
 # process, so this argtypes is process-global. Declaring a private struct here broke
@@ -130,6 +132,16 @@ class _Layer:
             self.hwnd = None
 
 
+def _log_render_failure_once(part: str) -> None:
+    """Log an indicator rendering failure once per process, with its traceback."""
+    if part in _render_failures_logged:
+        return
+    _render_failures_logged.add(part)
+    logger.warning(
+        "AI control indicator %s could not be rendered; continuing without it", part, exc_info=True
+    )
+
+
 def _monitor_rects() -> tuple[tuple[int, int, int, int], ...]:
     return tuple((r.left, r.top, r.right, r.bottom) for r in uia.GetMonitorsRect())
 
@@ -162,7 +174,13 @@ def _build_layers(
                     layers.append(
                         _Layer(x, y, w, h, _edge_bitmap(w, h, side, color), f"{index}_{side}")
                     )
-            notice = _notice_bitmap(width)
+            try:
+                notice = _notice_bitmap(width)
+            except Exception:
+                # Text needs FreeType, which application control can block
+                # (#478). Keep the edge glow and cursor ring without the text.
+                _log_render_failure_once("notice text")
+                notice = None
             if notice is not None:
                 notice_width, notice_height, bitmap = notice
                 # Narrow monitors retain the aura without letting its window spill onto a neighbor.
@@ -301,6 +319,7 @@ class _Indicator:
         ring: _Layer | None = None
         rects: tuple[tuple[int, int, int, int], ...] = ()
         mode: bool | None = None
+        built = False
         visible = False
         was_active = False
         breath_started = 0.0
@@ -317,41 +336,52 @@ class _Indicator:
                 if active:
                     if not was_active:
                         breath_started = time.monotonic()
+                        if ring is None:
+                            built = False  # Retry a failed render once per activation.
                     current_rects = _monitor_rects()
-                    if ring is None or current_rects != rects or mode != pending:
+                    if not built or current_rects != rects or mode != pending:
                         for layer in reversed(layers):
                             layer.close()
                         layers = []
                         if ring:
                             ring.close()
                             ring = None
-                        layers, ring = _build_layers(current_rects, pending)
+                        try:
+                            layers, ring = _build_layers(current_rects, pending)
+                        except Exception:
+                            # A rendering failure must not disable desktop
+                            # control (#478): degrade to no indicator and keep
+                            # acknowledging state changes. Retry on new geometry.
+                            _log_render_failure_once("overlay")
+                            layers, ring = [], None
+                        built = True
                         rects, mode = current_rects, pending
                         visible = False
                     if suspended:
                         if visible:
                             for layer in layers:
                                 layer.hide()
-                            ring.hide()
+                            if ring:
+                                ring.hide()
                             visible = False
                     else:
                         opacity = _breath_opacity(time.monotonic() - breath_started)
                         for layer in layers:
                             if layer.breathes:
                                 layer.set_opacity(opacity)
-                        if not pending:
+                        if ring and not pending:
                             ring.set_opacity(opacity)
                         if not visible:
                             for layer in layers:
                                 layer.show()
-                            if not pending:
+                            if ring and not pending:
                                 ring.show()
                             visible = True
-                        if not pending:
+                        if ring and not pending:
                             point = wintypes.POINT()
                             if _user32.GetCursorPos(ctypes.byref(point)):
                                 ring.move(point.x - _CURSOR_SIZE // 2, point.y - _CURSOR_SIZE // 2)
-                        else:
+                        elif ring:
                             ring.hide()
                 elif visible:
                     for layer in layers:
