@@ -148,9 +148,7 @@ class TestDxcamBackend:
 
     def test_full_desktop_available_on_a_single_output(self, monkeypatch):
         monkeypatch.setattr(screenshot, "dxcam", MagicMock())
-        monkeypatch.setattr(
-            _DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS[:1])
-        )
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS[:1]))
         monkeypatch.setattr(screenshot.uia, "GetVirtualScreenRect", lambda: (0, 0, 1920, 1080))
         backend = _DxcamBackend()
         assert backend.is_available(None) is True
@@ -284,17 +282,13 @@ class TestDxcamBackend:
         fake_dxcam = MagicMock()
         fake_dxcam.create.return_value.grab.return_value = bgra_frame(1920, 1080)
         monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
-        monkeypatch.setattr(
-            _DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS[:1])
-        )
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS[:1]))
         monkeypatch.setattr(screenshot.uia, "GetVirtualScreenRect", lambda: (0, 0, 1920, 1080))
 
         result = _DxcamBackend().capture(None)
 
         assert result.size == (1920, 1080)
-        fake_dxcam.create.assert_called_once_with(
-            device_idx=0, output_idx=0, output_color="BGRA"
-        )
+        fake_dxcam.create.assert_called_once_with(device_idx=0, output_idx=0, output_color="BGRA")
 
     def test_repeated_failures_retire_the_backend(self, monkeypatch):
         fake_dxcam = MagicMock()
@@ -604,9 +598,7 @@ class TestCapture:
         fake_dxcam = MagicMock()
         fake_dxcam.create.return_value.grab.return_value = bgra_frame(1920, 1080)
         monkeypatch.setattr(screenshot, "dxcam", fake_dxcam)
-        monkeypatch.setattr(
-            _DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS[:1])
-        )
+        monkeypatch.setattr(_DxcamBackend, "_iter_outputs", staticmethod(lambda: DXGI_OUTPUTS[:1]))
         monkeypatch.setattr(screenshot.uia, "GetVirtualScreenRect", lambda: (0, 0, 1920, 1080))
 
         image, backend_name = capture(None, backend="auto")

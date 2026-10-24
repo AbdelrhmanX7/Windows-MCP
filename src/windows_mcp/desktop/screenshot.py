@@ -175,7 +175,7 @@ class _DxcamBackend(_ScreenshotBackend):
                     coordinates = output.desc.DesktopCoordinates
                     if not output.attached_to_desktop:
                         continue
-                except (AttributeError, OSError, RuntimeError, ValueError, COMError):
+                except AttributeError, OSError, RuntimeError, ValueError, COMError:
                     logger.debug(
                         "Failed to read DXGI output geometry for device=%s output=%s",
                         device_idx,
@@ -344,7 +344,7 @@ class _PillowBackend(_ScreenshotBackend):
             )
         try:
             screenshot = ImageGrab.grab(**grab_kwargs)
-        except (OSError, RuntimeError, ValueError):
+        except OSError, RuntimeError, ValueError:
             if capture_rect is not None:
                 logger.warning(
                     "Failed to capture selected region directly, "
@@ -431,7 +431,7 @@ def _is_usable_capture(image: Image.Image | None) -> bool:
         return False
     try:
         image.load()
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return False
     return True
 

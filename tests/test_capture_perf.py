@@ -203,9 +203,7 @@ class TestSemanticTreeRendering:
 
     def test_multiline_names_stay_on_one_line(self):
         root = SemanticNode(control_type="Desktop", element_type="desktop", name="Desktop")
-        root.add_child(
-            SemanticNode(control_type="Window", element_type="window", name="One\nTwo")
-        )
+        root.add_child(SemanticNode(control_type="Window", element_type="window", name="One\nTwo"))
         text = TreeState(semantic_tree_root=root).semantic_tree_to_string()
         assert text.splitlines()[-1].strip() == '└── window "One Two"'
 

@@ -569,9 +569,7 @@ def _run_overlay(
             intensity_q = round(intensity * _INTENSITY_QUANT)
             if intensity_q != last_intensity_q:
                 opacity = 0 if intensity < _MIN_VISIBLE_INTENSITY else round(intensity * 255)
-                _push_bitmap(
-                    hwnd, union_left, union_top, width, height, glow_bgra, opacity=opacity
-                )
+                _push_bitmap(hwnd, union_left, union_top, width, height, glow_bgra, opacity=opacity)
                 last_intensity_q = intensity_q
             _pump_messages(hwnd)
             # Wake immediately when a capture cancels the flash.
