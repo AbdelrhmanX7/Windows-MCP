@@ -380,7 +380,30 @@ class Desktop:
     def get_cursor_location(self) -> tuple[int, int]:
         return uia.GetCursorPos()
 
-    def get_apps_from_start_menu(self) -> dict[str, str]:
+    # Enumerating the Start menu costs two PowerShell round trips (Get-StartApps
+    # alone is ~0.4 s cold), so the map is reused for a while; launch_app refreshes
+    # it on a miss so a just-installed app is still found.
+    _APPS_CACHE_TTL_S = 300.0
+
+    def get_apps_from_start_menu(self, refresh: bool = False) -> dict[str, str]:
+        """Get installed apps, cached for ``_APPS_CACHE_TTL_S`` seconds.
+
+        Args:
+            refresh: Ignore the cached map and enumerate again.
+
+        Returns:
+            Lower-cased display name mapped to AppID or shortcut path.
+        """
+        cached = getattr(self, "_apps_cache", None)
+        fresh = cached is not None and perf_counter() - cached[0] < self._APPS_CACHE_TTL_S
+        if fresh and not refresh:
+            return dict(cached[1])
+        apps = self._enumerate_start_menu_apps()
+        if apps:
+            self._apps_cache = (perf_counter(), apps)
+        return dict(apps)
+
+    def _enumerate_start_menu_apps(self) -> dict[str, str]:
         """Get installed apps. Tries Get-StartApps first, falls back to shortcut scanning."""
         command = "Get-StartApps | ConvertTo-Csv -NoTypeInformation"
         apps_info, status = PowerShellExecutor.execute_command(command)
@@ -541,17 +564,20 @@ class Desktop:
                 if status != 0:
                     return response
 
-                # Smart wait using UIA Exists (avoids manual Python loops)
                 launched = False
                 if pid > 0:
-                    if uia.WindowControl(ProcessId=pid).Exists(maxSearchSeconds=10):
-                        launched = True
+                    launched = self._wait_for_process_window(pid, timeout=10)
 
                 if not launched:
-                    # Fallback: Regex search for the window title
+                    # Fallback: Regex search for the window title (UWP apps, and
+                    # launchers that hand off to another process).
                     safe_name = re.escape(name)
-                    if uia.WindowControl(RegexName=f"(?i).*{safe_name}.*").Exists(
-                        maxSearchSeconds=10
+                    # Top-level windows only: each probe is cheap enough to repeat
+                    # every 50 ms, and a nested element with the app's name cannot
+                    # pass for its window.
+                    window = uia.WindowControl(searchDepth=1, RegexName=f"(?i).*{safe_name}.*")
+                    if window.Exists(
+                        maxSearchSeconds=10, searchIntervalSeconds=self._WINDOW_POLL_S
                     ):
                         launched = True
 
@@ -571,6 +597,51 @@ class Desktop:
                 else:
                     return response
 
+    _WINDOW_POLL_S = 0.05
+
+    def _wait_for_process_window(self, pid: int, timeout: float) -> bool:
+        """Poll until ``pid`` owns a visible top-level window.
+
+        EnumWindows is a cheap user32 walk, so it can run every 50 ms and return
+        as soon as the window is mapped (UIA's Exists polled a tree search every
+        0.5 s).
+
+        Args:
+            pid: Process id returned by Start-Process.
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            True when a window appeared in time.
+        """
+
+        def has_window() -> bool:
+            found = []
+
+            def callback(hwnd, _):
+                if win32gui.IsWindowVisible(hwnd) and not win32gui.GetWindow(
+                    hwnd, win32con.GW_OWNER
+                ):
+                    _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
+                    if owner_pid == pid:
+                        found.append(hwnd)
+                        return False
+                return True
+
+            try:
+                win32gui.EnumWindows(callback, None)
+            except Exception:
+                # EnumWindows reports an error when the callback stops it early.
+                pass
+            return bool(found)
+
+        deadline = perf_counter() + timeout
+        while True:
+            if has_window():
+                return True
+            if perf_counter() >= deadline:
+                return False
+            sleep(self._WINDOW_POLL_S)
+
     def _check_app_exists(self, app_id: str) -> bool:
         """Check if an app with the given AppID exists in shell:AppsFolder."""
         safe_app_id = ps_quote(app_id)
@@ -584,6 +655,12 @@ class Desktop:
     def launch_app(self, name: str) -> tuple[str, int, int]:
         apps_map = self.get_apps_from_start_menu()
         matched_app = process.extractOne(name, apps_map.keys(), score_cutoff=70)
+        if matched_app is None or matched_app[1] < 100:
+            # The cached map may predate an install, and a fuzzy hit on it could
+            # pick the wrong app (e.g. "notepad++" -> "notepad" right after
+            # Notepad++ is installed), so only an exact hit skips re-enumerating.
+            apps_map = self.get_apps_from_start_menu(refresh=True)
+            matched_app = process.extractOne(name, apps_map.keys(), score_cutoff=70)
         if matched_app is None:
             return (f"{name.title()} not found in start menu.", 1, 0)
         app_name, _ = matched_app

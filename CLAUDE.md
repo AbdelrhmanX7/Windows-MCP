@@ -49,7 +49,7 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 
 **Virtual Desktop Manager** — `vdm/core.py`: Tracks which windows belong to which Windows virtual desktop (Win10/11).
 
-**Domain services** — thin packages backing the system tools: `filesystem/` (read/write/copy/move/delete/list/search/info), `registry/` (get/set/delete/list, implemented via PowerShell cmdlets), `powershell/` (`PowerShellExecutor` plus environment resolution), `process/` (list/kill), `notifications/`. Registry and PowerShell tools shell out, so their latency is dominated by process startup.
+**Domain services** — thin packages backing the system tools: `filesystem/` (read/write/copy/move/delete/list/search/info), `registry/` (get/set/delete/list, implemented via PowerShell cmdlets), `powershell/` (`PowerShellExecutor` plus environment resolution), `process/` (list/kill), `notifications/`. Registry, PowerShell, App and Notification run their commands in a persistent PowerShell session (`powershell/session.py`; falls back to one process per call when the session is busy, fails, or is disabled), so a warm call costs milliseconds instead of a ~1 s process start.
 
 **Infrastructure** — `infrastructure/`: cross-cutting concerns. `analytics.py` (optional PostHog telemetry, disabled with `ANONYMIZED_TELEMETRY=false`; records tool names and errors only, never arguments or outputs), `auth.py` and `oauth.py` (bearer-token and OAuth middleware for HTTP transports), `security.py` (SSRF validation, IP allowlist middleware), `config.py` (server configuration). Note `windows_mcp/config.py` at the package root is unrelated — it only holds the `WINDOWS_MCP_DEBUG` helpers.
 
@@ -94,6 +94,8 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `WINDOWS_MCP_RESOLVER_MODEL` | `claude-haiku-5-5` | Vision model for tier 2. Key from `ANTHROPIC_API_KEY`. Resolved in `resolver/config.py`. |
 | `WINDOWS_MCP_RESOLVER_VISION_TIMEOUT` | `3.0` | Seconds allowed for the tier-2 request; on timeout or error the resolver degrades to tier-1 results. Resolved in `resolver/config.py`. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(off)_ | Set to `1`/`true`/`yes`/`on` to suppress the orange-red glowing border that briefly appears after every screenshot. Resolved in `desktop/flash_overlay.py`. |
+| `WINDOWS_MCP_INPUT_SETTLE_MS` | `30` | Milliseconds slept after each injected click/key chord/wheel tick (was a fixed 500 ms from python-uiautomation; `500` restores it, range `0`–`5000`). Resolved in `uia/settle.py` and read on every call. Same-spot clicks are still kept apart by the double-click time and `Type` polls for the clicked window to take the foreground (`desktop/input_timing.py`). |
+| `WINDOWS_MCP_POWERSHELL_SESSION` | `on` | Set to `off`/`0`/`false`/`no` to start a fresh PowerShell process per command instead of using the persistent session. Session semantics (state reset per command, timeout/respawn, one-shot fallback) are documented in `powershell/session.py`; resolved in `powershell/service.py`. |
 
 ## Security Context
 

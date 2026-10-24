@@ -754,6 +754,13 @@ If your MCP client runs inside Electron and you want to automate its windows too
 
 When a window stops answering UI Automation (its UI thread is busy, deadlocked, or still starting up), `Snapshot`, `WaitFor` and other UI-tree tools now skip that window after one timeout. The window is reported as a failed capture, and the rest of the desktop is still returned. Previously the call waited until the window recovered, and every later tool call queued behind it. Raise these values only if an application legitimately needs longer for a single accessibility call. To stop traversing an application at all, use `WINDOWS_MCP_EXCLUDE_PROCESSES`.
 
+### Input and shell latency
+
+| Variable | Default | Description |
+|---|---|---|
+| `WINDOWS_MCP_INPUT_SETTLE_MS` | `30` | Milliseconds to wait after each injected click, key chord or wheel tick before the tool returns. Replaces the fixed 500 ms wait inherited from python-uiautomation, which made every `Click`/`Shortcut` cost over half a second. Accepts `0`–`5000`; invalid values use the default. Set `500` to restore the old timing. Consecutive clicks at the same spot still wait out the system double-click time so they never merge into a double-click, and `Type` polls (up to 200 ms) for the clicked window to take the foreground before sending keys. |
+| `WINDOWS_MCP_POWERSHELL_SESSION` | `on` | Run `PowerShell`, `Registry`, `App` and `Notification` commands in one long-lived PowerShell process instead of starting `powershell.exe` (about 1 s) per call. Set to `off`/`0`/`false`/`no` to always start a fresh process. Each command still starts in the home directory with the session's start-up environment (location, `$env:` changes, `$LASTEXITCODE` and `$Error` are reset; plain variables and functions are scoped to the command), but `$global:` variables, imported modules and `Add-Type` types persist. `exit N` returns `N` and restarts the session. A call that times out kills the session and only the processes that call started (apps launched by earlier calls survive); the next call starts a new session. A call that arrives while the session is busy, or when it cannot start, runs in a fresh process as before. Errors come back as plain text instead of Windows PowerShell's CLIXML. |
+
 ### Desktop control settings
 
 If a physical key/button release event is missed, the input monitor checks residual
